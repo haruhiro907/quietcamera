@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.quietcamera"
         minSdk = 30
         targetSdk = 36
-        versionCode = 8
-        versionName = "0.2.0"
+        versionCode = 9
+        versionName = "0.3.0"
     }
 
     buildTypes {
@@ -52,6 +52,7 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
     implementation(libs.androidx.camera.extensions)
+    implementation(libs.androidx.datastore.preferences)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

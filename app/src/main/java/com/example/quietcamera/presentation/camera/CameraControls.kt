@@ -41,6 +41,14 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.roundToInt
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import com.example.quietcamera.data.AppSettings
+import com.example.quietcamera.data.AspectSetting
+import com.example.quietcamera.data.CaptureQuality
+import com.example.quietcamera.data.LaunchCamera
 
 /** 設計書 3.3 のアクセント色（フォーカス枠・選択中表示）。 */
 val AccentYellow = Color(0xFFFFD60A)
@@ -85,7 +93,8 @@ val nearest = stops.minByOrNull { kotlin.math.abs(it - currentZoom)}?: 1.0f
 Row(
 modifier = modifier
 .clip(RoundedCornerShape(50))
-.background(Color.Black.copy(alpha = 0.45f))
+.background(Color.White.copy(alpha = 0.14f))
+.border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(50))
 .padding(horizontal = 6.dp, vertical = 4.dp)
 .pillPressGestures(stops, onStopSelected, onDialOpen),
 horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -327,7 +336,8 @@ modifier: Modifier = Modifier,
 Row(
 modifier = modifier
 .clip(RoundedCornerShape(50))
-.background(Color.Black.copy(alpha = 0.6f))
+.background(Color.White.copy(alpha = 0.14f))
+.border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(50))
 .padding(horizontal = 6.dp, vertical = 4.dp),
 horizontalArrangement = Arrangement.spacedBy(4.dp),
 ) {
@@ -481,6 +491,375 @@ fun Modifier.previewGestures(
                 change.consume()
             }
             prevY = change.position.y
+        }
+    }
+}
+
+// ---------------- Phase 5: ガラス表現・設定パネル・グリッド・水準器 ----------------
+
+/** ガラスの縁（設計書 3.3: tint は白 α0.12〜0.20）。 */
+val GlassBorder = Color.White.copy(alpha = 0.22f)
+
+/** このファイル内のガラス面の基本色。 */
+val GlassFill = Color.White.copy(alpha = 0.14f)
+
+/** 上部中央のシェブロン（設定パネルの開閉、設計書 3.2）。 */
+@Composable
+fun ChevronIcon(expanded: Boolean, modifier: Modifier = Modifier) {
+    Canvas(
+        modifier = modifier.graphicsLayer { rotationZ = if (expanded) 180f else 0f },
+    ) {
+        val stroke = 2.dp.toPx()
+        drawLine(
+            Color.White,
+            Offset(size.width * 0.22f, size.height * 0.66f),
+            Offset(size.width * 0.5f, size.height * 0.34f),
+            stroke, StrokeCap.Round,
+        )
+        drawLine(
+            Color.White,
+            Offset(size.width * 0.5f, size.height * 0.34f),
+            Offset(size.width * 0.78f, size.height * 0.66f),
+            stroke, StrokeCap.Round,
+        )
+    }
+}
+
+/** 歯車アイコン（アプリ設定、設計書 3.2）。自作ベクター。 */
+@Composable
+fun GearIcon(modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier) {
+        val c = Offset(size.width / 2, size.height / 2)
+        val rOut = size.minDimension / 2
+        drawCircle(
+            Color.White, rOut * 0.62f, c,
+            style = androidx.compose.ui.graphics.drawscope.Stroke(2.dp.toPx()),
+        )
+        for (i in 0 until 8) {
+            val a = Math.toRadians(i * 45.0)
+            val from = Offset(
+                c.x + (rOut * 0.62f * kotlin.math.cos(a)).toFloat(),
+                c.y + (rOut * 0.62f * kotlin.math.sin(a)).toFloat(),
+            )
+            val to = Offset(
+                c.x + (rOut * 0.92f * kotlin.math.cos(a)).toFloat(),
+                c.y + (rOut * 0.92f * kotlin.math.sin(a)).toFloat(),
+            )
+            drawLine(Color.White, from, to, 2.dp.toPx(), StrokeCap.Round)
+        }
+        drawCircle(Color.White, rOut * 0.16f, c)
+    }
+}
+
+/** タイマーアイコン（時計）。 */
+@Composable
+fun TimerIcon(modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier) {
+        val c = Offset(size.width / 2, size.height / 2)
+        drawCircle(
+            Color.White,
+            size.minDimension / 2 - 1.dp.toPx(),
+            c,
+            style = androidx.compose.ui.graphics.drawscope.Stroke(1.8.dp.toPx()),
+        )
+        drawLine(
+            Color.White, c, Offset(c.x, c.y - size.minDimension / 4),
+            1.8.dp.toPx(), StrokeCap.Round,
+        )
+        drawLine(
+            Color.White, c, Offset(c.x + size.minDimension / 5, c.y),
+            1.8.dp.toPx(), StrokeCap.Round,
+        )
+    }
+}
+
+/** 3×3 グリッド（設計書 4.6: 細い白線 α0.4）。 */
+@Composable
+fun GridOverlay(modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier.fillMaxSize()) {
+        val color = Color.White.copy(alpha = 0.4f)
+        val w = size.width
+        val h = size.height
+        val sw = 1.dp.toPx()
+        drawLine(color, Offset(w / 3, 0f), Offset(w / 3, h), sw)
+        drawLine(color, Offset(2 * w / 3, 0f), Offset(2 * w / 3, h), sw)
+        drawLine(color, Offset(0f, h / 3), Offset(w, h / 3), sw)
+        drawLine(color, Offset(0f, 2 * h / 3), Offset(w, 2 * h / 3), sw)
+    }
+}
+
+/**
+ * 水準器（設計書 4.6）。中央の固定目盛（黄）に回転する水平線が重なると水平。
+ * angleDeg は端末の傾き（重力センサーから算出）。
+ */
+@Composable
+fun LevelIndicator(angleDeg: Float, modifier: Modifier = Modifier) {
+    val isLevel = kotlin.math.abs(angleDeg) <= 1f
+    val lineColor = if (isLevel) AccentYellow else Color.White.copy(alpha = 0.85f)
+    Box(
+        modifier = modifier.size(150.dp, 24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier
+                .size(20.dp, 2.dp)
+                .background(AccentYellow.copy(alpha = 0.95f)),
+        )
+        Row(
+            modifier = Modifier.graphicsLayer { rotationZ = -angleDeg },
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Box(Modifier.width(56.dp).height(2.dp).background(lineColor))
+            Box(Modifier.width(56.dp).height(2.dp).background(lineColor))
+        }
+    }
+}
+
+/** 設定パネル内のセグメント選択（ガラス調）。 */
+@Composable
+fun SegmentedControl(
+    options: List<String>,
+    selectedIndex: Int,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(50))
+            .background(Color.White.copy(alpha = 0.10f))
+            .padding(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        options.forEachIndexed { index, label ->
+            val selected = index == selectedIndex
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(50))
+                    .background(
+                        if (selected) Color.White.copy(alpha = 0.30f)
+                        else Color.Transparent
+                    )
+                    .clickable { onSelect(index) }
+                    .padding(vertical = 6.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = label,
+                    color = if (selected) Color.White else Color.White.copy(alpha = 0.7f),
+                    fontSize = 12.sp,
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                )
+            }
+        }
+    }
+}
+
+/** 設定の 1 行（ラベル + 操作部）。 */
+@Composable
+fun SettingRow(
+    label: String,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            color = Color.White,
+            fontSize = 13.sp,
+            modifier = Modifier.width(128.dp),
+        )
+        Box(Modifier.weight(1f)) { content() }
+    }
+}
+
+private fun onOffIndex(value: Boolean) = if (value) 1 else 0
+private val ON_OFF = listOf("OFF", "ON")
+
+/**
+ * 撮影設定パネル（設計書 4.3 / 5.2 / 10.1 / 10.2）。
+ * Liquid Glass 風: 半透明の地に白 tint と細い縁。プレビュー映像のブラーは
+ * SurfaceView のため効かないので、暗色半透明で代替する（3.5 のフォールバック）。
+ */
+@Composable
+fun SettingsPanel(
+    settings: AppSettings,
+    onFlashMode: (FlashMode) -> Unit,
+    onTimer: (TimerSetting) -> Unit,
+    onAspect: (AspectSetting) -> Unit,
+    onGrid: (Boolean) -> Unit,
+    onLevel: (Boolean) -> Unit,
+    onQuality: (CaptureQuality) -> Unit,
+    onSoundEnabled: (Boolean) -> Unit,
+    onSoundVolume: (Float) -> Unit,
+    onSoundInSilent: (Boolean) -> Unit,
+    onHaptics: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(24.dp))
+            .background(Color.Black.copy(alpha = 0.66f))
+            .border(1.dp, GlassBorder, RoundedCornerShape(24.dp))
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+    ) {
+        SettingRow("アスペクト比") {
+            SegmentedControl(
+                options = AspectSetting.entries.map { it.label },
+                selectedIndex = settings.aspect.ordinal,
+                onSelect = { onAspect(AspectSetting.entries[it]) },
+            )
+        }
+        SettingRow("画質") {
+            SegmentedControl(
+                options = CaptureQuality.entries.map { it.label },
+                selectedIndex = settings.quality.ordinal,
+                onSelect = { onQuality(CaptureQuality.entries[it]) },
+            )
+        }
+        SettingRow("フラッシュ") {
+            SegmentedControl(
+                options = FlashMode.entries.map { it.name },
+                selectedIndex = settings.flashMode.ordinal,
+                onSelect = { onFlashMode(FlashMode.entries[it]) },
+            )
+        }
+        SettingRow("タイマー") {
+            SegmentedControl(
+                options = listOf("OFF", "3秒", "10秒"),
+                selectedIndex = TimerSetting.entries
+                    .indexOfFirst { it.seconds == settings.timerSeconds }
+                    .coerceAtLeast(0),
+                onSelect = { onTimer(TimerSetting.entries[it]) },
+            )
+        }
+        SettingRow("グリッド") {
+            SegmentedControl(
+                options = ON_OFF,
+                selectedIndex = onOffIndex(settings.gridEnabled),
+                onSelect = { onGrid(it == 1) },
+            )
+        }
+        SettingRow("水準器") {
+            SegmentedControl(
+                options = ON_OFF,
+                selectedIndex = onOffIndex(settings.levelEnabled),
+                onSelect = { onLevel(it == 1) },
+            )
+        }
+        SettingRow("シャッター音") {
+            SegmentedControl(
+                options = ON_OFF,
+                selectedIndex = onOffIndex(settings.soundEnabled),
+                onSelect = { onSoundEnabled(it == 1) },
+            )
+        }
+        SettingRow("音量") {
+            Slider(
+                value = settings.soundVolume,
+                onValueChange = onSoundVolume,
+                enabled = settings.soundEnabled,
+                valueRange = 0f..1f,
+                colors = SliderDefaults.colors(
+                    thumbColor = Color.White,
+                    activeTrackColor = Color.White.copy(alpha = 0.85f),
+                    inactiveTrackColor = Color.White.copy(alpha = 0.25f),
+                ),
+            )
+        }
+        SettingRow("マナーモード時も鳴らす") {
+            SegmentedControl(
+                options = ON_OFF,
+                selectedIndex = onOffIndex(settings.soundInSilentMode),
+                onSelect = { onSoundInSilent(it == 1) },
+            )
+        }
+        SettingRow("触覚フィードバック") {
+            SegmentedControl(
+                options = ON_OFF,
+                selectedIndex = onOffIndex(settings.hapticsEnabled),
+                onSelect = { onHaptics(it == 1) },
+            )
+        }
+    }
+}
+
+/** アプリ設定画面（設計書 10.3）。歯車から開く全画面オーバーレイ。 */
+@Composable
+fun AppSettingsScreen(
+    settings: AppSettings,
+    onLaunchCamera: (LaunchCamera) -> Unit,
+    onMirror: (Boolean) -> Unit,
+    onReset: () -> Unit,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color.Black),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 24.dp, vertical = 20.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "設定",
+                    color = Color.White,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Box(Modifier.weight(1f))
+                TopBarButton(onClick = onClose) {
+                    Text(text = "✕", color = Color.White, fontSize = 15.sp)
+                }
+            }
+            SettingRow("起動時のカメラ", modifier = Modifier.padding(top = 16.dp)) {
+                SegmentedControl(
+                    options = listOf("背面", "前面"),
+                    selectedIndex = settings.launchCamera.ordinal,
+                    onSelect = { onLaunchCamera(LaunchCamera.entries[it]) },
+                )
+            }
+            SettingRow("前面カメラのミラー保存") {
+                SegmentedControl(
+                    options = ON_OFF,
+                    selectedIndex = onOffIndex(settings.mirrorFrontPhoto),
+                    onSelect = { onMirror(it == 1) },
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .padding(top = 28.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(GlassFill)
+                    .border(1.dp, GlassBorder, RoundedCornerShape(50))
+                    .clickable { onReset() }
+                    .padding(horizontal = 18.dp, vertical = 10.dp),
+            ) {
+                Text(
+                    text = "設定を初期化",
+                    color = Color(0xFFFF453A),
+                    fontSize = 13.sp,
+                )
+            }
+            Box(Modifier.weight(1f))
+            Text(
+                text = "Quiet Camera 0.3.0",
+                color = Color.White.copy(alpha = 0.45f),
+                fontSize = 11.sp,
+            )
         }
     }
 }

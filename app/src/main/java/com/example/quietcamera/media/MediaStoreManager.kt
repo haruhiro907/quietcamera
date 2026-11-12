@@ -3,9 +3,15 @@ package com.example.quietcamera.media
 import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.ContentValues
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.net.Uri
 import android.provider.MediaStore
 import androidx.camera.core.ImageCapture
+import java.io.ByteArrayOutputStream
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -23,17 +29,10 @@ object MediaStoreManager {
     private var lastBaseName: String? = null
     private var suffixCounter = 0
 
-    /**
-     * @param isReversedHorizontal 前面カメラの保存ミラー指定（4.7: 既定は非ミラー）。
-     * null のときは CameraX の既定に任せる。
-     */
     @Synchronized
-    fun newOutputOptions(
-        resolver: ContentResolver,
-        isReversedHorizontal: Boolean? = null,
-    ): ImageCapture.OutputFileOptions {
+    private fun nextDisplayName(): String {
         val base = "IMG_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val displayName = if (base == lastBaseName) {
+        return if (base == lastBaseName) {
             suffixCounter++
             "%s_%03d".format(base, suffixCounter)
         } else {
@@ -41,8 +40,18 @@ object MediaStoreManager {
             suffixCounter = 0
             base
         }
+    }
+
+    /**
+     * @param isReversedHorizontal 前面カメラの保存ミラー指定（4.7: 既定は非ミラー）。
+     * null のときは CameraX の既定に任せる。
+     */
+    fun newOutputOptions(
+        resolver: ContentResolver,
+        isReversedHorizontal: Boolean? = null,
+    ): ImageCapture.OutputFileOptions {
         val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
+            put(MediaStore.Images.Media.DISPLAY_NAME, nextDisplayName())
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
             put(MediaStore.Images.Media.RELATIVE_PATH, "DCIM/QuietCamera")
             put(MediaStore.Images.Media.IS_PENDING, 1)
@@ -57,6 +66,84 @@ object MediaStoreManager {
             )
         }
         return builder.build()
+    }
+
+    /**
+     * 1:1 撮影用: 一時ファイルに撮った JPEG を EXIF の向きで正立させ、中央を
+     * 正方形に切り抜いて MediaStore へ保存する（設計書 4.3 アスペクト比）。
+     * IO スレッドから呼ぶこと。
+     *
+     * @param flipHorizontal 前面カメラのミラー保存（10.3）
+     */
+    fun saveSquareJpeg(
+        resolver: ContentResolver,
+        source: File,
+        flipHorizontal: Boolean,
+        jpegQuality: Int,
+    ): Uri? {
+        val decoded = BitmapFactory.decodeFile(source.absolutePath) ?: return null
+        val oriented = applyExifOrientation(decoded, source)
+        val size = minOf(oriented.width, oriented.height)
+        val x = (oriented.width - size) / 2
+        val y = (oriented.height - size) / 2
+        var squared = Bitmap.createBitmap(oriented, x, y, size, size)
+        if (flipHorizontal) {
+            val matrix = Matrix().apply { postScale(-1f, 1f) }
+            squared = Bitmap.createBitmap(squared, 0, 0, size, size, matrix, true)
+        }
+        val bytes = ByteArrayOutputStream().also { out ->
+            squared.compress(Bitmap.CompressFormat.JPEG, jpegQuality, out)
+        }.toByteArray()
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, nextDisplayName())
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            put(MediaStore.Images.Media.RELATIVE_PATH, "DCIM/QuietCamera")
+            put(MediaStore.Images.Media.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            ?: return null
+        return try {
+            resolver.openOutputStream(uri)?.use { it.write(bytes) }
+            val done = ContentValues().apply {
+                put(MediaStore.Images.Media.IS_PENDING, 0)
+            }
+            resolver.update(uri, done, null, null)
+            uri
+        } catch (e: Exception) {
+            try {
+                resolver.delete(uri, null, null)
+            } catch (ignored: Exception) {
+            }
+            null
+        }
+    }
+
+    /** EXIF の Orientation を実ピクセルへ反映する（回転・反転）。 */
+    private fun applyExifOrientation(bitmap: Bitmap, source: File): Bitmap {
+        val orientation = try {
+            ExifInterface(source.absolutePath)
+                .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+        } catch (e: Exception) {
+            ExifInterface.ORIENTATION_NORMAL
+        }
+        val matrix = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+            ExifInterface.ORIENTATION_TRANSPOSE -> {
+                matrix.postRotate(90f)
+                matrix.postScale(-1f, 1f)
+            }
+            ExifInterface.ORIENTATION_TRANSVERSE -> {
+                matrix.postRotate(270f)
+                matrix.postScale(-1f, 1f)
+            }
+            else -> return bitmap
+        }
+        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     }
 
     /**
