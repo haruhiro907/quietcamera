@@ -383,3 +383,104 @@ fun Modifier.pillPressGestures(
     }
 }
 
+
+/**
+ * プレビューのジェスチャ判定（単一ハンドラ）。
+ * 指の本数で意味を決めるので、露出表示中でも 2 本指は必ずピンチになる。
+ * - 2 本指: ピンチズームのみ（タップ・露出には化けない。ピンチ後の残り指も無視）
+ * - 1 本指の短いタップ: フォーカス
+ * - 1 本指の長押し: AE/AF ロック
+ * - 1 本指の縦ドラッグ: 露出調整
+ */
+fun Modifier.previewGestures(
+    onTapFocus: (Offset) -> Unit,
+    onLongPressLock: (Offset) -> Unit,
+    onPinchZoom: (Float) -> Unit,
+    onExposureDrag: (Float) -> Unit,
+): Modifier = pointerInput(Unit) {
+    val touchSlop = viewConfiguration.touchSlop
+    val longPressTimeout = viewConfiguration.longPressTimeoutMillis
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        var pinch = false
+        var exposure = false
+        var dead = false
+        var prevDist = 0f
+        var prevY = down.position.y
+
+        // 第 1 段階: 長押しタイムアウトか、意味のある最初のイベントを待つ
+        val firstEvent = withTimeoutOrNull(longPressTimeout) {
+            var e = awaitPointerEvent()
+            while (true) {
+                val pressed = e.changes.filter { it.pressed }
+                when {
+                    pressed.size >= 2 -> break
+                    pressed.isEmpty() -> break
+                    (pressed[0].position - down.position).getDistance() > touchSlop -> break
+                }
+                e = awaitPointerEvent()
+            }
+            e
+        }
+        if (firstEvent == null) {
+            // 指を置いたまま長押し時間が経過 → AE/AF ロック
+            onLongPressLock(down.position)
+            while (true) {
+                val e = awaitPointerEvent()
+                if (e.changes.none { it.pressed }) break
+            }
+            return@awaitEachGesture
+        }
+        val firstPressed = firstEvent.changes.filter { it.pressed }
+        when {
+            firstPressed.isEmpty() -> {
+                val upPos = firstEvent.changes.firstOrNull()?.position ?: down.position
+                onTapFocus(upPos)
+                return@awaitEachGesture
+            }
+            firstPressed.size >= 2 -> pinch = true
+            else -> {
+                val change = firstPressed[0]
+                if (kotlin.math.abs(change.position.y - down.position.y) >
+                    kotlin.math.abs(change.position.x - down.position.x)
+                ) {
+                    exposure = true
+                    onExposureDrag(change.position.y - prevY)
+                    change.consume()
+                } else {
+                    dead = true
+                }
+                prevY = change.position.y
+            }
+        }
+        if (dead) {
+            while (true) {
+                val e = awaitPointerEvent()
+                if (e.changes.none { it.pressed }) break
+            }
+            return@awaitEachGesture
+        }
+        // 第 2 段階: ピンチ / 露出ドラッグの継続
+        while (true) {
+            val e = awaitPointerEvent()
+            val pressed = e.changes.filter { it.pressed }
+            if (pressed.isEmpty()) break
+            if (pressed.size >= 2) {
+                pinch = true
+                exposure = false
+                val d = (pressed[0].position - pressed[1].position).getDistance()
+                if (prevDist > 0f && d > 0f) onPinchZoom(d / prevDist)
+                prevDist = d
+                e.changes.forEach { it.consume() }
+                continue
+            }
+            if (pinch) continue // ピンチ後に残った 1 本指は離すまで無視する
+            val change = pressed[0]
+            if (exposure) {
+                onExposureDrag(change.position.y - prevY)
+                change.consume()
+            }
+            prevY = change.position.y
+        }
+    }
+}
