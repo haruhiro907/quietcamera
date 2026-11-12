@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.PowerManager
 import android.os.SystemClock
+import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -14,75 +15,80 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
-import com.example.quietcamera.presentation.camera.DiagnosticsScreen
+import com.example.quietcamera.presentation.camera.CameraScreen
 import com.example.quietcamera.presentation.theme.QuietCameraTheme
 
-class MainActivity : ComponentActivity() {
-
-    /** 起動した瞬間にロックされていたか（設計書 4.8 の判定に使う）。 */
-    private var launchedWhileLocked = false
-
-    /** 起動→画面表示の計測開始点（onCreate 先頭）。 */
-    private var createUptimeMs = 0L
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        createUptimeMs = SystemClock.uptimeMillis()
-        val keyguard = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
-        launchedWhileLocked = keyguard.isKeyguardLocked
-        super.onCreate(savedInstanceState)
-        setContent {
-            QuietCameraTheme {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
-                    CameraPermissionRequester()
-                    // Phase 0: 能力調査画面を表示する（Phase 1 でプレビューに置き換わる）
-                    DiagnosticsScreen(startUptimeMs = createUptimeMs)
-                }
-            }
-        }
-    }
-
-    override fun onStop() {
-        super.onStop()
-        // 設計書 4.8【仮決定】: ロック画面から起動したセッションは、画面が消灯したら終了する。
-        // 通常起動のセッションは対象外（launchedWhileLocked のときだけ判定する）。
-        if (launchedWhileLocked) {
-            val power = getSystemService(Context.POWER_SERVICE) as PowerManager
-            if (!power.isInteractive) finish()
-        }
-    }
-}
+class MainActivity: ComponentActivity() {
 
 /**
- * 起動時に CAMERA 権限を要求する。調査項目の大半（Camera2 特性）は権限なしでも
- * 取得できるため、拒否されても画面自体は表示し続ける。
- */
-@Composable
-private fun CameraPermissionRequester() {
-    val context = LocalContext.current
-    var requested by remember { mutableStateOf(false) }
-    val launcher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { /* 結果は使わない（撮影プローブ側で失敗として表示される） */ }
+* ロック画面経由のセッションか（設計書 4.8）。
+* 起動時点でロック中だった場合と、STILL_IMAGE_CAMERA_SECURE で起動した場合に真。
+*/
+private var lockSession = false
 
-    LaunchedEffect(Unit) {
-        if (!requested &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            requested = true
-            launcher.launch(Manifest.permission.CAMERA)
-        }
-    }
+/** 起動→プレビュー表示の計測開始点（onCreate 先頭）。 */
+private var createUptimeMs = 0L
+
+override fun onCreate(savedInstanceState: Bundle?) {
+createUptimeMs = SystemClock.uptimeMillis()
+val keyguard = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+lockSession = keyguard.isKeyguardLocked ||
+intent?.action == MediaStore.ACTION_IMAGE_CAPTURE_SECURE
+super.onCreate(savedInstanceState)
+
+// 設計書 4.8 の不具合対策（Phase 0 実機確認で判明）:
+// showWhenLocked をマニフェストで常時有効にすると、通常セッションでも
+// 再点灯時にロック画面へアプリが重なって表示される。ロック経由の
+// セッションのときだけ、プログラムから有効化する。
+if (lockSession) {
+setShowWhenLocked(true)
+setTurnScreenOn(true)
+}
+
+setContent {
+QuietCameraTheme {
+Surface(
+modifier = Modifier.fillMaxSize(),
+color = MaterialTheme.colorScheme.background
+) {
+var granted by remember {
+mutableStateOf(
+ContextCompat.checkSelfPermission(
+this@MainActivity,
+Manifest.permission.CAMERA
+) == PackageManager.PERMISSION_GRANTED
+)
+}
+val launcher = rememberLauncherForActivityResult(
+ActivityResultContracts.RequestPermission()
+) { granted = it}
+LaunchedEffect(Unit) {
+if (!granted) launcher.launch(Manifest.permission.CAMERA)
+}
+
+CameraScreen(
+cameraGranted = granted,
+startUptimeMs = createUptimeMs,
+)
+}
+}
+}
+}
+
+override fun onStop() {
+super.onStop()
+// 設計書 4.8: ロック経由のセッションは、画面が消灯したら終了する。
+// 通常セッションは対象外。
+if (lockSession) {
+val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+if (!power.isInteractive) finish()
+}
+}
 }
