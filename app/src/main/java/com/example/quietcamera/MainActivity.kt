@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.PowerManager
-import android.os.SystemClock
 import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -33,11 +32,7 @@ class MainActivity: ComponentActivity() {
 */
 private var lockSession = false
 
-/** 起動→プレビュー表示の計測開始点（onCreate 先頭）。 */
-private var createUptimeMs = 0L
-
 override fun onCreate(savedInstanceState: Bundle?) {
-createUptimeMs = SystemClock.uptimeMillis()
 val keyguard = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
 lockSession = keyguard.isKeyguardLocked ||
 intent?.action == MediaStore.ACTION_IMAGE_CAPTURE_SECURE
@@ -73,10 +68,7 @@ LaunchedEffect(Unit) {
 if (!granted) launcher.launch(Manifest.permission.CAMERA)
 }
 
-CameraScreen(
-cameraGranted = granted,
-startUptimeMs = createUptimeMs,
-)
+CameraScreen(cameraGranted = granted)
 }
 }
 }
