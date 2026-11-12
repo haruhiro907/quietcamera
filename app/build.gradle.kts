@@ -12,7 +12,7 @@ android {
         applicationId = "com.example.quietcamera"
         minSdk = 30
         targetSdk = 36
-        versionCode = 9
+        versionCode = 10
         versionName = "0.3.0"
     }
 

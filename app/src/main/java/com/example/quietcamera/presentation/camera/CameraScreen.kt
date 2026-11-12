@@ -157,10 +157,14 @@ fun CameraScreen(
 
     var useFrontCamera by remember { mutableStateOf(false) }
     var launchCameraApplied by remember { mutableStateOf(false) }
-    LaunchedEffect(settings) {
-        if (!launchCameraApplied) {
-            useFrontCamera = settings.launchCamera == LaunchCamera.FRONT
-            launchCameraApplied = true
+    // 起動時カメラは DataStore の「最初の実データ」で一度だけ適用する。
+    // collectAsState の初期値（既定値）は実データではないので、適用判定には使わない。
+    LaunchedEffect(Unit) {
+        settingsStore.settings.collect { loaded ->
+            if (!launchCameraApplied) {
+                useFrontCamera = loaded.launchCamera == LaunchCamera.FRONT
+                launchCameraApplied = true
+            }
         }
     }
 
