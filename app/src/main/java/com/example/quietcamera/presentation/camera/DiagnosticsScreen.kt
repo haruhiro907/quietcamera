@@ -1,10 +1,12 @@
 package com.example.quietcamera.presentation.camera
 
+import android.app.KeyguardManager
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -31,6 +33,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
@@ -45,7 +48,7 @@ import kotlinx.coroutines.launch
  * 実機でしか分からない項目（システム撮影音・振動の弱さ）はテストボタンで確認する。
  */
 @Composable
-fun DiagnosticsScreen(modifier: Modifier = Modifier) {
+fun DiagnosticsScreen(modifier: Modifier = Modifier, startUptimeMs: Long = 0L) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
@@ -53,6 +56,24 @@ fun DiagnosticsScreen(modifier: Modifier = Modifier) {
     var report by remember { mutableStateOf("調査中…") }
     var captureResult by remember { mutableStateOf<String?>(null) }
     var capturing by remember { mutableStateOf(false) }
+
+    // 設計書 2.3 / 4.8: ロック状態の判定と、起動→画面表示までの時間の計測
+    val keyguardLocked = remember {
+        (context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager)
+            .isKeyguardLocked
+    }
+    var firstLayoutElapsedMs by remember { mutableStateOf<Long?>(null) }
+
+    val fullReport = buildString {
+        append(report)
+        append("\n\n--- 起動・ロック（2.3 / 4.8）---\n")
+        append("起動状態: ")
+        append(if (keyguardLocked) "ロック中（ロック画面の上）" else "通常起動")
+        append('\n')
+        append("起動→画面表示: ")
+        append(firstLayoutElapsedMs?.let { "$it ms" } ?: "未計測")
+        append('\n')
+    }
 
     LaunchedEffect(Unit) {
         report = CameraCapabilities.collectReport(context)
@@ -62,18 +83,41 @@ fun DiagnosticsScreen(modifier: Modifier = Modifier) {
         modifier = modifier
             .fillMaxSize()
             .padding(16.dp)
+            .onGloballyPositioned {
+                if (firstLayoutElapsedMs == null && startUptimeMs > 0L) {
+                    firstLayoutElapsedMs = SystemClock.uptimeMillis() - startUptimeMs
+                }
+            }
     ) {
         Text(
             text = "Quiet Camera — Phase 0 能力調査",
             style = MaterialTheme.typography.titleMedium
+        )
+        Text(
+            text = "起動状態: " + if (keyguardLocked) "ロック中（ロック画面の上）" else "通常起動",
+            fontSize = 12.sp
+        )
+        Text(
+            text = "起動→画面表示: " +
+                (firstLayoutElapsedMs?.let { "$it ms（目標 1500ms 以内・4.8）" } ?: "計測中…"),
+            fontSize = 12.sp
         )
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = {
                 scope.launch { report = CameraCapabilities.collectReport(context) }
             }) { Text("再調査") }
-            Button(onClick = { shareText(context, report) }) { Text("結果を共有") }
-            Button(onClick = { copyText(context, report) }) { Text("コピー") }
+            // 4.8: ロック中は他アプリを開かない（共有シートを出さない）
+            Button(enabled = !keyguardLocked, onClick = { shareText(context, fullReport) }) {
+                Text("結果を共有")
+            }
+            Button(onClick = { copyText(context, fullReport) }) { Text("コピー") }
+        }
+        if (keyguardLocked) {
+            Text(
+                text = "ロック中は「結果を共有」を無効化しています（4.8）。解除後に共有してください。",
+                fontSize = 11.sp
+            )
         }
         Spacer(Modifier.height(8.dp))
         HorizontalDivider()

@@ -1,8 +1,12 @@
 package com.example.quietcamera
 
 import android.Manifest
+import android.app.KeyguardManager
+import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.PowerManager
+import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -23,7 +27,17 @@ import com.example.quietcamera.presentation.camera.DiagnosticsScreen
 import com.example.quietcamera.presentation.theme.QuietCameraTheme
 
 class MainActivity : ComponentActivity() {
+
+    /** 起動した瞬間にロックされていたか（設計書 4.8 の判定に使う）。 */
+    private var launchedWhileLocked = false
+
+    /** 起動→画面表示の計測開始点（onCreate 先頭）。 */
+    private var createUptimeMs = 0L
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        createUptimeMs = SystemClock.uptimeMillis()
+        val keyguard = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+        launchedWhileLocked = keyguard.isKeyguardLocked
         super.onCreate(savedInstanceState)
         setContent {
             QuietCameraTheme {
@@ -33,9 +47,19 @@ class MainActivity : ComponentActivity() {
                 ) {
                     CameraPermissionRequester()
                     // Phase 0: 能力調査画面を表示する（Phase 1 でプレビューに置き換わる）
-                    DiagnosticsScreen()
+                    DiagnosticsScreen(startUptimeMs = createUptimeMs)
                 }
             }
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // 設計書 4.8【仮決定】: ロック画面から起動したセッションは、画面が消灯したら終了する。
+        // 通常起動のセッションは対象外（launchedWhileLocked のときだけ判定する）。
+        if (launchedWhileLocked) {
+            val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (!power.isInteractive) finish()
         }
     }
 }
