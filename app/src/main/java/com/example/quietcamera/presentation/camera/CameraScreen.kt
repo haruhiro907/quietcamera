@@ -32,7 +32,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -51,8 +50,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -115,6 +116,8 @@ fun CameraScreen(
     // バインド済みカメラと制御値
     var camera by remember { mutableStateOf<Camera?>(null) }
     var zoomRatio by remember { mutableFloatStateOf(1f) }
+    val latestZoom by rememberUpdatedState(zoomRatio)
+    var lastPinchAt by remember { mutableLongStateOf(0L) }
     var minZoom by remember { mutableFloatStateOf(1f) }
     var maxZoom by remember { mutableFloatStateOf(1f) }
     var exposureIndex by remember { mutableIntStateOf(0) }
@@ -549,18 +552,24 @@ fun CameraScreen(
                     .onSizeChanged { previewSize = it }
                     .pointerInput(camera) {
                         detectTapGestures(
-                            onTap = { focusAt(it, lock = false) },
+                            onTap = {
+                                // ピンチ直後の指離しをタップと誤認しない
+                                if (android.os.SystemClock.uptimeMillis() - lastPinchAt > 300) {
+                                    focusAt(it, lock = false)
+                                }
+                            },
                             onLongPress = { focusAt(it, lock = true) },
                         )
                     }
                     .pointerInput(camera) {
-                        detectTransformGestures { _, _, zoom, _ ->
-                            if (zoom != 1f) setZoom(zoomRatio * zoom)
-                        }
-                    }
-                    .pointerInput(camera) {
-                        detectVerticalDragGestures { _, dragAmount ->
-                            adjustExposure(dragAmount)
+                        detectTransformGestures { _, pan, zoom, _ ->
+                            if (zoom != 1f) {
+                                lastPinchAt = android.os.SystemClock.uptimeMillis()
+                                setZoom(latestZoom * zoom)
+                            } else if (kotlin.math.abs(pan.y) > kotlin.math.abs(pan.x)) {
+                                // 1 本指の縦移動は露出調整（2 本指のときは zoom が 1 にならない）
+                                adjustExposure(pan.y)
+                            }
                         }
                     },
             ) {

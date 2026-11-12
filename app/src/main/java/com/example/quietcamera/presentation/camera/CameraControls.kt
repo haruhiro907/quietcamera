@@ -5,7 +5,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -84,9 +87,7 @@ modifier = modifier
 .clip(RoundedCornerShape(50))
 .background(Color.Black.copy(alpha = 0.45f))
 .padding(horizontal = 6.dp, vertical = 4.dp)
-.pointerInput(Unit) {
-detectTapGestures(onLongPress = { onDialOpen()})
-},
+.pillPressGestures(stops, onStopSelected, onDialOpen),
 horizontalArrangement = Arrangement.spacedBy(4.dp),
 verticalAlignment = Alignment.CenterVertically,
 ) {
@@ -103,8 +104,7 @@ modifier = Modifier
 .clip(CircleShape)
 .background(
 if (isActive) Color.White.copy(alpha = 0.22f) else Color.Transparent
-)
-.clickable { onStopSelected(stop)},
+),
 contentAlignment = Alignment.Center,
 ) {
 Text(
@@ -352,3 +352,34 @@ fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
 }
 }
 }
+
+/**
+ * ズームピルの押下処理。短押しは座標からボタンを判定して倍率切替、
+ * 長押し（離さずに長押し時間を超える）でダイヤルを開く。
+ * ボタン側の clickable と競合しないよう、ピル全体で一括して受ける。
+ */
+fun Modifier.pillPressGestures(
+    stops: List<Float>,
+    onStopSelected: (Float) -> Unit,
+    onDialOpen: () -> Unit,
+): Modifier = pointerInput(stops) {
+    val longPressTimeout = viewConfiguration.longPressTimeoutMillis
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        val released = withTimeoutOrNull(longPressTimeout) {
+            waitForUpOrCancellation()
+        }
+        if (released == null) {
+            onDialOpen()
+        } else {
+            val startPx = 6.dp.toPx()
+            val stepPx = 36.dp.toPx() + 4.dp.toPx()
+            val idx = ((down.position.x - startPx) / stepPx).toInt()
+            if (idx in stops.indices) {
+                val withinButton = down.position.x - startPx - idx * stepPx <= 36.dp.toPx()
+                if (withinButton) onStopSelected(stops[idx])
+            }
+        }
+    }
+}
+
