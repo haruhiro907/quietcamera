@@ -5,9 +5,15 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.util.Size
 import android.view.Surface
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
@@ -15,6 +21,7 @@ import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.camera.view.ScreenFlashView
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -24,6 +31,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -41,8 +50,10 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,12 +62,14 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -66,16 +79,17 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.quietcamera.camera.OrientationProvider
 import com.example.quietcamera.media.MediaStoreManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 /**
- * Phase 3: 基本 UI（設計書 3.2 / 4.1 / 7.3）。
+ * Phase 4: カメラ制御（設計書 4.2 ズーム / 4.4 フォーカス・露出 / 4.3 フラッシュ / 4.5 タイマー）。
  *
- * - 4:3 プレビューを上下の黒帯の間に配置
- * - 下部: 左に最新写真のサムネイル、中央に iPhone 風シャッター、右に前後切替
- * - 最下部に PHOTO 表示
- * - 上部バー（フラッシュ等）は Phase 4、ガラス表現は Phase 5 で実装する
+ * レイアウトは 3.2 のまま（4:3 プレビュー + 上下の黒帯）。
+ * 設定パネルとガラス表現は Phase 5 で実装する。
  */
 @Composable
 fun CameraScreen(
@@ -85,6 +99,7 @@ fun CameraScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val view = LocalView.current
+    val scope = rememberCoroutineScope()
 
     val keyguardLocked = remember {
         (context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager)
@@ -93,18 +108,45 @@ fun CameraScreen(
 
     var useFrontCamera by remember { mutableStateOf(false) }
     var previewReady by remember { mutableStateOf(false) }
+    var previewSize by remember { mutableStateOf(IntSize.Zero) }
     var errorStatus by remember { mutableStateOf<String?>(null) }
     var flashVisible by remember { mutableStateOf(false) }
 
-    // サムネイル（7.3: 自アプリで撮影した最新の写真）
+    // バインド済みカメラと制御値
+    var camera by remember { mutableStateOf<Camera?>(null) }
+    var zoomRatio by remember { mutableFloatStateOf(1f) }
+    var minZoom by remember { mutableFloatStateOf(1f) }
+    var maxZoom by remember { mutableFloatStateOf(1f) }
+    var exposureIndex by remember { mutableIntStateOf(0) }
+    var exposureMin by remember { mutableIntStateOf(0) }
+    var exposureMax by remember { mutableIntStateOf(0) }
+    var exposureStepEv by remember { mutableFloatStateOf(1f / 6f) }
+    var exposureFloat by remember { mutableFloatStateOf(0f) }
+
+    // フォーカス UI
+    var focusPoint by remember { mutableStateOf<Offset?>(null) }
+    var focusLocked by remember { mutableStateOf(false) }
+    var focusShowKey by remember { mutableIntStateOf(0) }
+    var focusVisible by remember { mutableStateOf(false) }
+
+    // フラッシュ / タイマー
+    var flashMode by remember { mutableStateOf(FlashMode.AUTO) }
+    var flashMenuOpen by remember { mutableStateOf(false) }
+    var timerSetting by remember { mutableStateOf(TimerSetting.OFF) }
+    var countdown by remember { mutableStateOf<Int?>(null) }
+
+    // ズームダイヤル
+    var dialOpen by remember { mutableStateOf(false) }
+
+    // サムネイル
     var lastSavedUri by remember { mutableStateOf<Uri?>(null) }
     var thumbnail by remember { mutableStateOf<Bitmap?>(null) }
 
-    // シャッターの押下・撮影中状態（4.1: 内側円の縮小）
+    // シャッター
     var shutterPressed by remember { mutableStateOf(false) }
     var capturing by remember { mutableStateOf(false) }
 
-    // 端末の向き（アイコン回転用・3.2 共通仕様）
+    // 端末の向き（アイコン回転）
     var iconRotation by remember { mutableFloatStateOf(0f) }
     val animatedIconRotation by animateFloatAsState(
         targetValue = iconRotation,
@@ -112,7 +154,6 @@ fun CameraScreen(
         label = "iconRotation",
     )
 
-    // 設計書 3.2: カメラ画面表示中は画面を消灯させない
     DisposableEffect(Unit) {
         view.keepScreenOn = true
         onDispose { view.keepScreenOn = false }
@@ -122,6 +163,13 @@ fun CameraScreen(
         PreviewView(context).apply {
             implementationMode = PreviewView.ImplementationMode.PERFORMANCE
             scaleType = PreviewView.ScaleType.FILL_CENTER
+        }
+    }
+
+    val screenFlashView = remember {
+        ScreenFlashView(context).apply {
+            isClickable = false
+            isFocusable = false
         }
     }
 
@@ -139,7 +187,6 @@ fun CameraScreen(
             .build()
     }
 
-    // 端末の向き → ImageCapture.targetRotation とアイコン回転（6.3 / 3.2）
     DisposableEffect(imageCapture) {
         val provider = OrientationProvider(context) { rotation ->
             imageCapture.targetRotation = rotation
@@ -162,7 +209,7 @@ fun CameraScreen(
         onDispose { previewView.previewStreamState.removeObserver(observer) }
     }
 
-    // カメラのバインド（前後切替で再バインド）
+    // カメラのバインド（前後切替で再バインドし、制御値は初期化する）
     LaunchedEffect(cameraGranted, useFrontCamera) {
         if (!cameraGranted) return@LaunchedEffect
         previewReady = false
@@ -174,8 +221,12 @@ fun CameraScreen(
                     .setResolutionSelector(aspect43Selector)
                     .build()
                 preview.surfaceProvider = previewView.surfaceProvider
+                // 前面は画面フラッシュ（4.7）。背面は物理フラッシュを使う
+                imageCapture.setScreenFlash(
+                    if (useFrontCamera) screenFlashView.screenFlash else null
+                )
                 provider.unbindAll()
-                provider.bindToLifecycle(
+                camera = provider.bindToLifecycle(
                     lifecycleOwner,
                     if (useFrontCamera) {
                         CameraSelector.DEFAULT_FRONT_CAMERA
@@ -185,12 +236,47 @@ fun CameraScreen(
                     preview,
                     imageCapture,
                 )
+                exposureIndex = 0
+                exposureFloat = 0f
+                focusLocked = false
+                focusPoint = null
+                countdown = null
             },
             ContextCompat.getMainExecutor(context),
         )
     }
 
-    // 起動時: 自アプリの最新写真をサムネイルにする（7.3）
+    // バインド済みカメラからズーム・露出の状態を取り込む
+    DisposableEffect(camera) {
+        val cam = camera
+        if (cam == null) {
+            onDispose { }
+        } else {
+            val zoomObserver = Observer<androidx.camera.core.ZoomState> { state ->
+                zoomRatio = state.zoomRatio
+                minZoom = state.minZoomRatio
+                maxZoom = state.maxZoomRatio
+            }
+            cam.cameraInfo.zoomState.observe(lifecycleOwner, zoomObserver)
+            val exposureState = cam.cameraInfo.exposureState
+            if (exposureState.isExposureCompensationSupported) {
+                exposureMin = exposureState.exposureCompensationRange.lower
+                exposureMax = exposureState.exposureCompensationRange.upper
+                exposureStepEv = exposureState.exposureCompensationStep.toFloat()
+            }
+            onDispose { cam.cameraInfo.zoomState.removeObserver(zoomObserver) }
+        }
+    }
+
+    // フラッシュモードを ImageCapture へ反映する
+    LaunchedEffect(flashMode) {
+        imageCapture.flashMode = when (flashMode) {
+            FlashMode.AUTO -> ImageCapture.FLASH_MODE_AUTO
+            FlashMode.ON -> ImageCapture.FLASH_MODE_ON
+            FlashMode.OFF -> ImageCapture.FLASH_MODE_OFF
+        }
+    }
+
     LaunchedEffect(Unit) {
         val uri = withContext(Dispatchers.IO) {
             MediaStoreManager.latestPhotoUri(context.contentResolver)
@@ -198,7 +284,6 @@ fun CameraScreen(
         if (uri != null && lastSavedUri == null) lastSavedUri = uri
     }
 
-    // サムネイル画像の読み込み
     LaunchedEffect(lastSavedUri) {
         val uri = lastSavedUri
         thumbnail = if (uri == null) {
@@ -214,7 +299,6 @@ fun CameraScreen(
         }
     }
 
-    // 撮影確認の暗転（3.4）
     LaunchedEffect(flashVisible) {
         if (flashVisible) {
             delay(90)
@@ -222,7 +306,6 @@ fun CameraScreen(
         }
     }
 
-    // エラー表示は数秒で消す
     LaunchedEffect(errorStatus) {
         if (errorStatus != null) {
             delay(3000)
@@ -230,13 +313,88 @@ fun CameraScreen(
         }
     }
 
-    fun takePhoto() {
-        // 設計書 11.2: プレビュー開始前は撮影を受け付けない
+    // フォーカス枠の表示制御（3.4: 1.3→1.0 倍、約 1.5 秒表示、フェードアウト）
+    val focusScale by animateFloatAsState(
+        targetValue = if (focusVisible) 1f else 1.3f,
+        animationSpec = spring(stiffness = Spring.StiffnessMedium),
+        label = "focusScale",
+    )
+    val focusAlpha by animateFloatAsState(
+        targetValue = if (focusVisible) 1f else 0f,
+        label = "focusAlpha",
+    )
+    LaunchedEffect(focusShowKey) {
+        if (focusShowKey == 0) return@LaunchedEffect
+        focusVisible = true
+        if (!focusLocked) {
+            delay(1500)
+            focusVisible = false
+        }
+    }
+    LaunchedEffect(focusLocked) {
+        if (focusLocked) focusVisible = true
+    }
+
+    fun setZoom(ratio: Float) {
+        val cam = camera ?: return
+        cam.cameraControl.setZoomRatio(ratio.coerceIn(minZoom, maxZoom))
+    }
+
+    var zoomAnimJob by remember { mutableStateOf<Job?>(null) }
+    fun animateZoomTo(target: Float) {
+        zoomAnimJob?.cancel()
+        val start = zoomRatio
+        val startTime = android.os.SystemClock.uptimeMillis()
+        zoomAnimJob = scope.launch {
+            while (true) {
+                val t = ((android.os.SystemClock.uptimeMillis() - startTime) / 250f)
+                    .coerceAtMost(1f)
+                val eased = 1f - (1f - t) * (1f - t)
+                setZoom(start + (target - start) * eased)
+                if (t >= 1f) break
+                delay(16)
+            }
+        }
+    }
+
+    fun focusAt(point: Offset, lock: Boolean) {
+        val cam = camera ?: return
+        val meteringPoint = previewView.meteringPointFactory.createPoint(point.x, point.y)
+        val builder = FocusMeteringAction.Builder(
+            meteringPoint,
+            FocusMeteringAction.FLAG_AF or
+                FocusMeteringAction.FLAG_AE or
+                FocusMeteringAction.FLAG_AWB,
+        )
+        if (lock) builder.disableAutoCancel()
+        cam.cameraControl.startFocusAndMetering(builder.build())
+        focusPoint = point
+        focusLocked = lock
+        focusVisible = false
+        focusShowKey++
+    }
+
+    fun adjustExposure(dragAmountY: Float) {
+        val cam = camera ?: return
+        exposureFloat = (exposureFloat - dragAmountY / 28f)
+            .coerceIn(exposureMin.toFloat(), exposureMax.toFloat())
+        val newIndex = exposureFloat.roundToInt()
+        if (newIndex != exposureIndex) {
+            exposureIndex = newIndex
+            cam.cameraControl.setExposureCompensationIndex(newIndex)
+        }
+        if (focusPoint == null && previewSize != IntSize.Zero) {
+            focusPoint = Offset(previewSize.width / 2f, previewSize.height / 2f)
+        }
+        focusShowKey++
+        focusVisible = true
+    }
+
+    fun doCapture() {
         if (!previewReady || capturing) return
         capturing = true
         val options = MediaStoreManager.newOutputOptions(
             context.contentResolver,
-            // 4.7: 前面の保存は既定で非ミラー
             isReversedHorizontal = if (useFrontCamera) false else null,
         )
         imageCapture.takePicture(
@@ -246,23 +404,42 @@ fun CameraScreen(
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                     capturing = false
                     flashVisible = true
-                    // 7.2: 保存結果の URI でサムネイルを更新する
                     lastSavedUri = output.savedUri ?: lastSavedUri
                 }
 
                 override fun onError(exception: ImageCaptureException) {
                     capturing = false
-                    // 11.2: 保存失敗は通知を出し、撮影画面は維持する
                     errorStatus = "保存に失敗しました"
                 }
             },
         )
     }
 
+    fun onShutter() {
+        when {
+            countdown != null -> countdown = null // 4.5: カウント中の再タップでキャンセル
+            timerSetting != TimerSetting.OFF -> countdown = timerSetting.seconds
+            else -> doCapture()
+        }
+    }
+
+    // タイマーのカウントダウン（4.5: 1 秒ごとに弱い触覚）
+    LaunchedEffect(countdown) {
+        var remaining = countdown ?: return@LaunchedEffect
+        while (remaining > 0) {
+            vibrateTick(context)
+            delay(1000)
+            remaining--
+            if (countdown == null) return@LaunchedEffect // キャンセルされた
+            countdown = remaining
+        }
+        countdown = null
+        doCapture()
+    }
+
     fun openThumbnail() {
         val uri = lastSavedUri ?: return
-        // 4.8: ロック中は写真アプリを開かない
-        if (keyguardLocked) return
+        if (keyguardLocked) return // 4.8: ロック中は写真アプリを開かない
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "image/*")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -274,141 +451,291 @@ fun CameraScreen(
         }
     }
 
-    Column(
+    val zoomStops = remember(minZoom, maxZoom) {
+        // 設計書 4.2 の表（0.6 / 1 / 2 + 端末の最大倍率）。範囲外の倍率は表示しない
+        val base = listOf(0.6f, 1.0f, 2.0f)
+            .filter { it >= minZoom - 0.001f && it <= maxZoom + 0.001f }
+        val withMax =
+            if (base.none { kotlin.math.abs(it - maxZoom) < 0.05f }) base + maxZoom else base
+        withMax.ifEmpty { listOf(minZoom) }
+    }
+    val exposureFraction =
+        if (exposureMax > exposureMin) {
+            (exposureIndex - exposureMin).toFloat() / (exposureMax - exposureMin)
+        } else {
+            0.5f
+        }
+
+    Box(
         modifier = modifier
             .fillMaxSize()
             .background(Color.Black),
     ) {
-        // 上部バー（黒帯）。フラッシュ／シェブロン／歯車は Phase 4 以降
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-            contentAlignment = Alignment.Center,
-        ) {
-            errorStatus?.let {
-                Text(text = it, color = Color.White, fontSize = 12.sp)
+        Column(Modifier.fillMaxSize()) {
+            // 上部バー: 左フラッシュ、右タイマー（設定パネルは Phase 5）
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .padding(horizontal = 16.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TopBarButton(onClick = { flashMenuOpen = !flashMenuOpen }) {
+                        BoltIcon(mode = flashMode, modifier = Modifier.size(20.dp))
+                    }
+                    if (flashMenuOpen) {
+                        FlashMenu(
+                            current = flashMode,
+                            onSelect = {
+                                flashMode = it
+                                flashMenuOpen = false
+                            },
+                            modifier = Modifier.padding(start = 8.dp),
+                        )
+                    }
+                    Box(Modifier.weight(1f))
+                    if (errorStatus != null) {
+                        Text(
+                            text = errorStatus!!,
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(end = 8.dp),
+                        )
+                    }
+                    TopBarButton(onClick = { timerSetting = timerSetting.next() }) {
+                        if (timerSetting == TimerSetting.OFF) {
+                            Canvas(Modifier.size(20.dp)) {
+                                val c = Offset(size.width / 2, size.height / 2)
+                                drawCircle(
+                                    Color.White,
+                                    size.minDimension / 2 - 1.dp.toPx(),
+                                    c,
+                                    style = androidx.compose.ui.graphics.drawscope.Stroke(
+                                        1.8.dp.toPx()
+                                    ),
+                                )
+                                drawLine(
+                                    Color.White, c,
+                                    Offset(c.x, c.y - size.minDimension / 4),
+                                    1.8.dp.toPx(), StrokeCap.Round,
+                                )
+                                drawLine(
+                                    Color.White, c,
+                                    Offset(c.x + size.minDimension / 5, c.y),
+                                    1.8.dp.toPx(), StrokeCap.Round,
+                                )
+                            }
+                        } else {
+                            Text(
+                                text = "${timerSetting.seconds}s",
+                                color = AccentYellow,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                    }
+                }
             }
-        }
 
-        // プレビュー（4:3）
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(4f / 3f),
-        ) {
-            if (cameraGranted) {
-                AndroidView(
-                    factory = { previewView },
-                    modifier = Modifier.fillMaxSize(),
-                )
-            } else {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            // プレビュー（4:3）+ ジェスチャ + オーバーレイ
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(4f / 3f)
+                    .onSizeChanged { previewSize = it }
+                    .pointerInput(camera) {
+                        detectTapGestures(
+                            onTap = { focusAt(it, lock = false) },
+                            onLongPress = { focusAt(it, lock = true) },
+                        )
+                    }
+                    .pointerInput(camera) {
+                        detectTransformGestures { _, _, zoom, _ ->
+                            if (zoom != 1f) setZoom(zoomRatio * zoom)
+                        }
+                    }
+                    .pointerInput(camera) {
+                        detectVerticalDragGestures { _, dragAmount ->
+                            adjustExposure(dragAmount)
+                        }
+                    },
+            ) {
+                if (cameraGranted) {
+                    AndroidView(
+                        factory = { previewView },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "カメラ権限が必要です",
+                            color = Color.White,
+                            fontSize = 13.sp,
+                        )
+                    }
+                }
+                if (flashVisible) {
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.45f)),
+                    )
+                }
+                // フォーカス枠（タップ位置が取れているときだけ）
+                val fp = focusPoint
+                if (fp != null && focusAlpha > 0.01f) {
+                    FocusIndicator(
+                        center = fp,
+                        exposureFraction = exposureFraction,
+                        scale = focusScale,
+                        alpha = focusAlpha,
+                    )
+                }
+                // AE/AF ロック表示（4.4）
+                if (focusLocked) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 10.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(Color.Black.copy(alpha = 0.5f))
+                            .padding(horizontal = 12.dp, vertical = 4.dp),
+                    ) {
+                        Text(
+                            text = "AE/AF ロック",
+                            color = AccentYellow,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+                // タイマーのカウントダウン（4.5）
+                countdown?.let { remaining ->
                     Text(
-                        text = "カメラ権限が必要です",
+                        text = remaining.toString(),
                         color = Color.White,
-                        fontSize = 13.sp,
+                        fontSize = 96.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.align(Alignment.Center),
                     )
                 }
             }
-            if (flashVisible) {
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.45f)),
-                )
-            }
-        }
 
-        // 下部コントロール（黒帯）: サムネイル／シャッター／切替 + PHOTO 表示
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .padding(horizontal = 24.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.Center,
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
+            // 下部: ズームピル + コントロール行 + PHOTO
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .padding(horizontal = 24.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                // 左下: サムネイル（7.3）
-                Box(
-                    modifier = Modifier.weight(1f),
-                    contentAlignment = Alignment.CenterStart,
+                if (dialOpen) {
+                    ZoomDial(
+                        minZoom = minZoom,
+                        maxZoom = maxZoom,
+                        currentZoom = zoomRatio,
+                        onZoomChange = { setZoom(it) },
+                        onClose = { dialOpen = false },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 8.dp),
+                    )
+                } else {
+                    ZoomPill(
+                        stops = zoomStops,
+                        currentZoom = zoomRatio,
+                        onStopSelected = { animateZoomTo(it) },
+                        onDialOpen = { dialOpen = true },
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Box(
-                        modifier = Modifier
-                            .size(48.dp)
-                            .graphicsLayer { rotationZ = animatedIconRotation }
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFF2C2C2E))
-                            .border(1.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
-                            .clickable(enabled = lastSavedUri != null && !keyguardLocked) {
-                                openThumbnail()
-                            },
+                        modifier = Modifier.weight(1f),
+                        contentAlignment = Alignment.CenterStart,
                     ) {
-                        thumbnail?.let {
-                            Image(
-                                bitmap = it.asImageBitmap(),
-                                contentDescription = "最新の写真",
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize(),
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .graphicsLayer { rotationZ = animatedIconRotation }
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF2C2C2E))
+                                .border(
+                                    1.dp,
+                                    Color.White.copy(alpha = 0.35f),
+                                    RoundedCornerShape(8.dp),
+                                )
+                                .clickable(
+                                    enabled = lastSavedUri != null && !keyguardLocked
+                                ) { openThumbnail() },
+                        ) {
+                            thumbnail?.let {
+                                Image(
+                                    bitmap = it.asImageBitmap(),
+                                    contentDescription = "最新の写真",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                            }
+                        }
+                    }
+
+                    ShutterButton(
+                        enabled = previewReady,
+                        pressed = shutterPressed,
+                        capturing = capturing || countdown != null,
+                        onPressedChange = { shutterPressed = it },
+                        onShutter = { onShutter() },
+                    )
+
+                    Box(
+                        modifier = Modifier.weight(1f),
+                        contentAlignment = Alignment.CenterEnd,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.16f))
+                                .clickable { useFrontCamera = !useFrontCamera },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            CameraSwitchIcon(
+                                modifier = Modifier
+                                    .size(26.dp)
+                                    .graphicsLayer { rotationZ = animatedIconRotation },
                             )
                         }
                     }
                 }
 
-                // 中央下: シャッター（4.1: 外径 76dp、リング 4dp、内側円 60dp）
-                ShutterButton(
-                    enabled = previewReady,
-                    pressed = shutterPressed,
-                    capturing = capturing,
-                    onPressedChange = { shutterPressed = it },
-                    onShutter = { takePhoto() },
+                Text(
+                    text = "PHOTO",
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    letterSpacing = 2.sp,
+                    modifier = Modifier.padding(top = 10.dp),
                 )
-
-                // 右下: 前面／背面カメラ切替
-                Box(
-                    modifier = Modifier.weight(1f),
-                    contentAlignment = Alignment.CenterEnd,
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clip(CircleShape)
-                            .background(Color.White.copy(alpha = 0.16f))
-                            .clickable { useFrontCamera = !useFrontCamera },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        CameraSwitchIcon(
-                            modifier = Modifier
-                                .size(26.dp)
-                                .graphicsLayer { rotationZ = animatedIconRotation },
-                        )
-                    }
-                }
             }
-
-            // 最下部: PHOTO 表示（3.2）
-            Text(
-                text = "PHOTO",
-                color = Color.White,
-                fontSize = 11.sp,
-                letterSpacing = 2.sp,
-                modifier = Modifier
-                    .align(Alignment.CenterHorizontally)
-                    .padding(top = 10.dp),
-            )
         }
+
+        // 前面の画面フラッシュ用オーバーレイ（タッチは透過させる）
+        AndroidView(
+            factory = { screenFlashView },
+            modifier = Modifier.fillMaxSize(),
+        )
     }
 }
 
-/**
- * iPhone 風シャッターボタン（設計書 4.1）。
- * 押下で内側円が 0.92 倍に縮小し、指を離した瞬間に撮影する。
- * 撮影中は縮小を保ち、保存コールバックで戻る（capturing は呼び出し側が管理）。
- */
+/** iPhone 風シャッターボタン（設計書 4.1）。 */
 @Composable
 private fun ShutterButton(
     enabled: Boolean,
@@ -440,13 +767,11 @@ private fun ShutterButton(
             },
         contentAlignment = Alignment.Center,
     ) {
-        // 外周リング（約 4dp）
         Box(
             Modifier
                 .size(76.dp)
                 .border(4.dp, Color.White, CircleShape),
         )
-        // 内側の白い円（約 60dp）
         Box(
             Modifier
                 .size(60.dp)
@@ -460,11 +785,14 @@ private fun ShutterButton(
     }
 }
 
-/** カメラ切替アイコン（2 本の弧と矢印で回転切替を表す簡易描画）。 */
+/** カメラ切替アイコン。 */
 @Composable
 private fun CameraSwitchIcon(modifier: Modifier = Modifier) {
     Canvas(modifier = modifier) {
-        val stroke = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
+        val stroke = androidx.compose.ui.graphics.drawscope.Stroke(
+            width = 2.dp.toPx(),
+            cap = StrokeCap.Round,
+        )
         val inset = 3.dp.toPx()
         val arcSize = androidx.compose.ui.geometry.Size(
             size.width - inset * 2,
@@ -489,17 +817,49 @@ private fun CameraSwitchIcon(modifier: Modifier = Modifier) {
             size = arcSize,
             style = stroke,
         )
-        // 矢印の先端（右上と左下に短い線）
         val cx = size.width / 2
         val cy = size.height / 2
         val r = size.width / 2 - inset
         val a1 = Math.toRadians(-30.0)
-        val p1 = Offset(cx + (r * kotlin.math.cos(a1)).toFloat(), cy + (r * kotlin.math.sin(a1)).toFloat())
-        drawLine(Color.White, p1, p1 + Offset(-6.dp.toPx(), 1.dp.toPx()), 2.dp.toPx(), StrokeCap.Round)
-        drawLine(Color.White, p1, p1 + Offset(-1.dp.toPx(), 6.dp.toPx()), 2.dp.toPx(), StrokeCap.Round)
+        val p1 = Offset(
+            cx + (r * kotlin.math.cos(a1)).toFloat(),
+            cy + (r * kotlin.math.sin(a1)).toFloat(),
+        )
+        drawLine(
+            Color.White, p1, p1 + Offset(-6.dp.toPx(), 1.dp.toPx()),
+            2.dp.toPx(), StrokeCap.Round,
+        )
+        drawLine(
+            Color.White, p1, p1 + Offset(-1.dp.toPx(), 6.dp.toPx()),
+            2.dp.toPx(), StrokeCap.Round,
+        )
         val a2 = Math.toRadians(150.0)
-        val p2 = Offset(cx + (r * kotlin.math.cos(a2)).toFloat(), cy + (r * kotlin.math.sin(a2)).toFloat())
-        drawLine(Color.White, p2, p2 + Offset(6.dp.toPx(), -1.dp.toPx()), 2.dp.toPx(), StrokeCap.Round)
-        drawLine(Color.White, p2, p2 + Offset(1.dp.toPx(), -6.dp.toPx()), 2.dp.toPx(), StrokeCap.Round)
+        val p2 = Offset(
+            cx + (r * kotlin.math.cos(a2)).toFloat(),
+            cy + (r * kotlin.math.sin(a2)).toFloat(),
+        )
+        drawLine(
+            Color.White, p2, p2 + Offset(6.dp.toPx(), -1.dp.toPx()),
+            2.dp.toPx(), StrokeCap.Round,
+        )
+        drawLine(
+            Color.White, p2, p2 + Offset(1.dp.toPx(), -6.dp.toPx()),
+            2.dp.toPx(), StrokeCap.Round,
+        )
+    }
+}
+
+private fun vibrateTick(context: Context) {
+    try {
+        val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager)
+                .defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        }
+        vibrator.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK))
+    } catch (e: Exception) {
+        // 触覚は補助機能なので失敗しても撮影フローは止めない
     }
 }
