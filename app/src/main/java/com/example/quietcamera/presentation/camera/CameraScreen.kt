@@ -932,11 +932,11 @@ fun CameraScreen(
                 }
             }
             // ズームピル / ダイヤルはプレビューの内側下部（パネル開時は隠す）。
-            // 中心がデバイス座標 y=1747 に来るよう、実測サイズからインセットを出す
+            // 中心がデバイス座標 y=1700 に来るよう、実測サイズからインセットを出す
             val pillInset = if (previewSize.height > 0 && pillSize.height > 0) {
                 val finderBottomPx = with(density) { previewTopOffset.toPx() } +
                     previewSize.height
-                val centerPx = 1747f * (effRootH / 2400f)
+                val centerPx = 1700f * (effRootH / 2400f)
                 ((finderBottomPx - centerPx - pillSize.height / 2f) /
                     density.density).dp.coerceAtLeast(0.dp)
             } else {
