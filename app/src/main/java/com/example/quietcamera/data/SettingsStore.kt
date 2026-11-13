@@ -46,6 +46,7 @@ data class AppSettings(
     val launchCamera: LaunchCamera = LaunchCamera.BACK,
     val mirrorFrontPhoto: Boolean = false,
     val geotagEnabled: Boolean = false,
+    val qrEnabled: Boolean = true,
 )
 
 private val Context.appDataStore by preferencesDataStore(name = "quiet_camera_settings")
@@ -67,6 +68,7 @@ class SettingsStore(private val context: Context) {
         val LAUNCH_CAMERA = stringPreferencesKey("launch_camera")
         val MIRROR_FRONT = booleanPreferencesKey("mirror_front_photo")
         val GEOTAG_ENABLED = booleanPreferencesKey("geotag_enabled")
+        val QR_ENABLED = booleanPreferencesKey("qr_enabled")
     }
 
     val settings: Flow<AppSettings> = context.appDataStore.data.map { prefs ->
@@ -92,6 +94,7 @@ class SettingsStore(private val context: Context) {
             }.getOrDefault(LaunchCamera.BACK),
             mirrorFrontPhoto = prefs[Keys.MIRROR_FRONT] ?: false,
             geotagEnabled = prefs[Keys.GEOTAG_ENABLED] ?: false,
+            qrEnabled = prefs[Keys.QR_ENABLED] ?: true,
         )
     }
 
@@ -143,6 +146,10 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setMirrorFrontPhoto(enabled: Boolean) {
         context.appDataStore.edit { it[Keys.MIRROR_FRONT] = enabled }
+    }
+
+    suspend fun setQrEnabled(enabled: Boolean) {
+        context.appDataStore.edit { it[Keys.QR_ENABLED] = enabled }
     }
 
     suspend fun clearAll() {

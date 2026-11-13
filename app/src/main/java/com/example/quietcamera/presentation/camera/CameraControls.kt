@@ -4,6 +4,15 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -694,6 +703,7 @@ fun SettingsPanel(
     onAspect: (AspectSetting) -> Unit,
     onGrid: (Boolean) -> Unit,
     onLevel: (Boolean) -> Unit,
+onQrEnabled: (Boolean) -> Unit,
     onQuality: (CaptureQuality) -> Unit,
     onSoundEnabled: (Boolean) -> Unit,
     onSoundVolume: (Float) -> Unit,
@@ -754,6 +764,13 @@ fun SettingsPanel(
                 onSelect = { onLevel(it == 1) },
             )
         }
+SettingRow("QRコード読み取り") {
+SegmentedControl(
+options = ON_OFF,
+selectedIndex = onOffIndex(settings.qrEnabled),
+onSelect = { onQrEnabled(it == 1) },
+)
+}
         SettingRow("シャッター音") {
             SegmentedControl(
                 options = ON_OFF,
@@ -879,4 +896,199 @@ fun AppSettingsScreen(
             )
         }
     }
+}
+
+// ---------------- QR コード読み取り（追加仕様） ----------------
+
+/** QR 読み取りの表示対象。rect はプレビュー座標（px）。 */
+data class QrTargetUi(
+val value: String,
+val domain: String?,
+val openable: Boolean,
+val rect: Rect,
+)
+
+/** 検出枠：対象 QR を黄色の角括弧（四隅のみ）で囲む。 */
+@Composable
+fun QrCornerFrame(
+rect: Rect,
+modifier: Modifier = Modifier,
+) {
+Canvas(modifier = modifier.fillMaxSize()) {
+val margin = 5.dp.toPx()
+val strokeWidth = 3.dp.toPx()
+val radius = 9.dp.toPx()
+val left = rect.left - margin
+val top = rect.top - margin
+val right = rect.right + margin
+val bottom = rect.bottom + margin
+val armX = ((right - left) * 0.30f).coerceAtMost(56.dp.toPx())
+val armY = ((bottom - top) * 0.30f).coerceAtMost(56.dp.toPx())
+val path = Path().apply {
+// 左上
+moveTo(left + armX, top)
+lineTo(left + radius, top)
+quadraticBezierTo(left, top, left, top + radius)
+lineTo(left, top + armY)
+// 右上
+moveTo(right - armX, top)
+lineTo(right - radius, top)
+quadraticBezierTo(right, top, right, top + radius)
+lineTo(right, top + armY)
+// 右下
+moveTo(right, bottom - armY)
+lineTo(right, bottom - radius)
+quadraticBezierTo(right, bottom, right - radius, bottom)
+lineTo(right - armX, bottom)
+// 左下
+moveTo(left + armX, bottom)
+lineTo(left + radius, bottom)
+quadraticBezierTo(left, bottom, left, bottom - radius)
+lineTo(left, bottom - armY)
+}
+drawPath(
+path = path,
+color = Color(0xFFFFCC00),
+style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
+)
+}
+}
+
+/** リンクバナー：タップで開く（URL のみ）、長押しでコピー／共有メニュー。 */
+@Composable
+fun QrBanner(
+target: QrTargetUi,
+onOpen: () -> Unit,
+onCopy: () -> Unit,
+onShare: () -> Unit,
+modifier: Modifier = Modifier,
+) {
+var menuOpen by remember { mutableStateOf(false) }
+val rest = if (target.domain != null) {
+target.value.substringAfter("://", target.value)
+.removePrefix(target.domain)
+} else {
+""
+}
+Box(modifier = modifier.fillMaxWidth()) {
+Row(
+modifier = Modifier
+.fillMaxWidth()
+.clip(RoundedCornerShape(50))
+.background(Color.Black.copy(alpha = 0.55f))
+.border(1.dp, GlassBorder, RoundedCornerShape(50))
+.combinedClickable(
+onClick = onOpen,
+onLongClick = { menuOpen = true },
+)
+.padding(horizontal = 16.dp, vertical = 11.dp),
+verticalAlignment = Alignment.CenterVertically,
+horizontalArrangement = Arrangement.spacedBy(10.dp),
+) {
+Canvas(modifier = Modifier.size(20.dp)) {
+val yellow = Color(0xFFFFCC00)
+val sw = 1.8.dp.toPx()
+if (target.openable) {
+// 外部リンクアイコン（枠＋矢印）
+val inset = 3.dp.toPx()
+val boxSize = 13.dp.toPx()
+drawRoundRect(
+color = yellow,
+topLeft = Offset(inset, inset + 4.dp.toPx()),
+size = Size(boxSize, boxSize),
+cornerRadius = CornerRadius(3.dp.toPx()),
+style = Stroke(width = sw),
+)
+val from = Offset(10.5.dp.toPx(), 10.dp.toPx())
+val to = Offset(17.dp.toPx(), 3.dp.toPx())
+drawLine(yellow, from, to, strokeWidth = sw, cap = StrokeCap.Round)
+drawLine(
+yellow,
+Offset(12.2.dp.toPx(), 3.dp.toPx()),
+to,
+strokeWidth = sw,
+cap = StrokeCap.Round,
+)
+drawLine(
+yellow,
+Offset(17.dp.toPx(), 7.8.dp.toPx()),
+to,
+strokeWidth = sw,
+cap = StrokeCap.Round,
+)
+} else {
+// コピーアイコン（重なった2枚の枠）
+val sw2 = 1.6.dp.toPx()
+drawRoundRect(
+color = yellow,
+topLeft = Offset(7.dp.toPx(), 3.dp.toPx()),
+size = Size(10.dp.toPx(), 13.dp.toPx()),
+cornerRadius = CornerRadius(2.5.dp.toPx()),
+style = Stroke(width = sw2),
+)
+drawRoundRect(
+color = yellow,
+topLeft = Offset(3.dp.toPx(), 7.dp.toPx()),
+size = Size(10.dp.toPx(), 13.dp.toPx()),
+cornerRadius = CornerRadius(2.5.dp.toPx()),
+style = Stroke(width = sw2),
+)
+}
+}
+Row(modifier = Modifier.weight(1f)) {
+Text(
+text = target.domain ?: target.value,
+color = Color.White,
+fontSize = 13.sp,
+fontWeight = FontWeight.Bold,
+maxLines = 1,
+overflow = if (target.domain == null) {
+TextOverflow.Ellipsis
+} else {
+TextOverflow.Clip
+},
+modifier = if (target.domain == null) {
+Modifier.weight(1f)
+} else {
+Modifier
+},
+)
+if (rest.isNotEmpty()) {
+Text(
+text = rest,
+color = Color.White.copy(alpha = 0.65f),
+fontSize = 13.sp,
+maxLines = 1,
+overflow = TextOverflow.Ellipsis,
+modifier = Modifier.weight(1f, fill = false),
+)
+}
+}
+Text(
+text = if (target.openable) "開く" else "コピー",
+color = Color(0xFFFFCC00),
+fontSize = 13.sp,
+fontWeight = FontWeight.Bold,
+)
+}
+DropdownMenu(
+expanded = menuOpen,
+onDismissRequest = { menuOpen = false },
+) {
+DropdownMenuItem(
+text = { Text("コピー") },
+onClick = {
+menuOpen = false
+onCopy()
+},
+)
+DropdownMenuItem(
+text = { Text("共有") },
+onClick = {
+menuOpen = false
+onShare()
+},
+)
+}
+}
 }

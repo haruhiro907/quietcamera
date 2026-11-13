@@ -27,10 +27,13 @@ import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.camera.core.AspectRatio
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.MediaStoreOutputOptions
 import androidx.camera.video.Quality
@@ -48,6 +51,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -85,6 +89,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -94,6 +99,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.Path
@@ -104,9 +110,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
@@ -124,6 +132,10 @@ import com.example.quietcamera.data.CaptureQuality
 import com.example.quietcamera.data.LaunchCamera
 import com.example.quietcamera.data.SettingsStore
 import com.example.quietcamera.media.MediaStoreManager
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.common.InputImage
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -303,6 +315,201 @@ fun CameraScreen(
         builder.build()
     }
 
+    // ---- QR コード読み取り（追加仕様：PHOTO モードで常時スキャン） ----
+    var qrTarget by remember { mutableStateOf<QrTargetUi?>(null) }
+    var qrShownTarget by remember { mutableStateOf<QrTargetUi?>(null) }
+    var qrCandidate by remember { mutableStateOf<String?>(null) }
+    var qrCandidateFrames by remember { mutableIntStateOf(0) }
+    var qrLastSeenMs by remember { mutableLongStateOf(0L) }
+
+    /** 解析画像の座標（未回転）をプレビュー表示座標（px）へ変換する。 */
+    fun mapQrRectToView(
+        box: android.graphics.Rect, imageW: Int, imageH: Int, rotation: Int,
+    ): Rect? {
+        val viewW = previewSize.width
+        val viewH = previewSize.height
+        if (viewW == 0 || viewH == 0 || imageW == 0 || imageH == 0) return null
+        fun mapPoint(x: Float, y: Float): Offset = when (rotation) {
+            90 -> Offset(imageH - y, x)
+            180 -> Offset(imageW - x, imageH - y)
+            270 -> Offset(y, imageW - x)
+            else -> Offset(x, y)
+        }
+        val upW = if (rotation == 90 || rotation == 270) imageH else imageW
+        val upH = if (rotation == 90 || rotation == 270) imageW else imageH
+        val scale = maxOf(viewW / upW.toFloat(), viewH / upH.toFloat())
+        val dx = (viewW - upW * scale) / 2f
+        val dy = (viewH - upH * scale) / 2f
+        fun toView(pt: Offset): Offset {
+            var vx = pt.x * scale + dx
+            val vy = pt.y * scale + dy
+            if (useFrontCamera) vx = viewW - vx
+            return Offset(vx, vy)
+        }
+        val a = toView(mapPoint(box.left.toFloat(), box.top.toFloat()))
+        val b = toView(mapPoint(box.right.toFloat(), box.bottom.toFloat()))
+        return Rect(
+            minOf(a.x, b.x), minOf(a.y, b.y),
+            maxOf(a.x, b.x), maxOf(a.y, b.y),
+        )
+    }
+
+    fun buildQrTarget(raw: String, barcode: Barcode, rect: Rect): QrTargetUi {
+        val urlText = if (barcode.valueType == Barcode.TYPE_URL) {
+            barcode.url?.url ?: raw
+        } else {
+            raw
+        }
+        val uri = runCatching { Uri.parse(urlText) }.getOrNull()
+        val scheme = uri?.scheme?.lowercase()
+        val openable = scheme == "http" || scheme == "https"
+        return QrTargetUi(
+            value = urlText,
+            domain = if (openable) uri?.host else null,
+            openable = openable,
+            rect = rect,
+        )
+    }
+
+    /**
+     * 検出結果の反映（追加仕様 3.1）: 対象は消えるまで固定し、
+     * 新規対象は同じ内容を 2 フレーム連続で検出したときに確定する。
+     * 複数あるときは画面中央に最も近いものを選ぶ。
+     */
+    fun handleQrBarcodes(
+        barcodes: List<Barcode>, imageW: Int, imageH: Int, rotation: Int,
+    ) {
+        if (panelOpen || appSettingsOpen || capturing ||
+            mode != ShootMode.PHOTO
+        ) {
+            return
+        }
+        val now = System.currentTimeMillis()
+        val hits = barcodes.mapNotNull { barcode ->
+            val raw = barcode.rawValue ?: return@mapNotNull null
+            val box = barcode.boundingBox ?: return@mapNotNull null
+            val rect = mapQrRectToView(box, imageW, imageH, rotation)
+                ?: return@mapNotNull null
+            Triple(raw, barcode, rect)
+        }
+        val current = qrTarget
+        if (current != null) {
+            val same = hits.firstOrNull { it.first == current.value }
+            if (same != null) {
+                qrTarget = current.copy(rect = same.third)
+                qrLastSeenMs = now
+            }
+            return
+        }
+        if (hits.isEmpty()) {
+            qrCandidate = null
+            qrCandidateFrames = 0
+            return
+        }
+        val center = Offset(previewSize.width / 2f, previewSize.height / 2f)
+        val nearest = hits.minByOrNull {
+            (it.third.center - center).getDistanceSquared()
+        } ?: return
+        if (nearest.first == qrCandidate) {
+            qrCandidateFrames++
+        } else {
+            qrCandidate = nearest.first
+            qrCandidateFrames = 1
+        }
+        if (qrCandidateFrames >= 2) {
+            qrTarget = buildQrTarget(nearest.first, nearest.second, nearest.third)
+            qrLastSeenMs = now
+            qrCandidate = null
+            qrCandidateFrames = 0
+        }
+    }
+
+    val barcodeScanner = remember {
+        BarcodeScanning.getClient(
+            BarcodeScannerOptions.Builder()
+                .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                .build()
+        )
+    }
+    DisposableEffect(Unit) {
+        onDispose { barcodeScanner.close() }
+    }
+
+    val imageAnalysis = remember {
+        ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setResolutionSelector(
+                ResolutionSelector.Builder()
+                    .setAspectRatioStrategy(
+                        AspectRatioStrategy(
+                            AspectRatio.RATIO_4_3,
+                            AspectRatioStrategy.FALLBACK_RULE_AUTO,
+                        )
+                    )
+                    .setResolutionStrategy(
+                        ResolutionStrategy(
+                            Size(1280, 960),
+                            ResolutionStrategy
+                                .FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER,
+                        )
+                    )
+                    .build()
+            )
+            .build()
+    }
+
+    LaunchedEffect(settings.qrEnabled) {
+        if (settings.qrEnabled) {
+            imageAnalysis.setAnalyzer(
+                ContextCompat.getMainExecutor(context),
+            ) { proxy ->
+                val mediaImage = proxy.image
+                if (mediaImage == null) {
+                    proxy.close()
+                } else {
+                    val rotation = proxy.imageInfo.rotationDegrees
+                    val w = proxy.width
+                    val h = proxy.height
+                    barcodeScanner.process(
+                        InputImage.fromMediaImage(mediaImage, rotation)
+                    )
+                        .addOnSuccessListener { barcodes ->
+                            handleQrBarcodes(barcodes, w, h, rotation)
+                        }
+                        .addOnCompleteListener { proxy.close() }
+                }
+            }
+        } else {
+            imageAnalysis.clearAnalyzer()
+        }
+    }
+
+    // 表示用ターゲットはフェードアウト中も保持する
+    LaunchedEffect(qrTarget) {
+        if (qrTarget != null) qrShownTarget = qrTarget
+    }
+
+    // パネル表示中・設定 OFF・動画モードでは対象を消す（追加仕様 3.4 / 4）
+    LaunchedEffect(panelOpen, settings.qrEnabled, mode) {
+        if (panelOpen || !settings.qrEnabled || mode != ShootMode.PHOTO) {
+            qrTarget = null
+            qrCandidate = null
+            qrCandidateFrames = 0
+        }
+    }
+
+    // 対象が見えなくなって約 1.2 秒後に消去する（追加仕様 3.2）
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(150)
+            if (qrTarget != null &&
+                System.currentTimeMillis() - qrLastSeenMs > 1200
+            ) {
+                qrTarget = null
+            }
+        }
+    }
+
     DisposableEffect(Unit) {
         val provider = OrientationProvider(context) { rotation ->
             deviceRotation = rotation
@@ -394,7 +601,7 @@ fun CameraScreen(
     }
 
     // カメラのバインド（前後切替・アスペクト比・画質・モードの変更で再バインド）
-    LaunchedEffect(cameraGranted, useFrontCamera, imageCapture, mode) {
+    LaunchedEffect(cameraGranted, useFrontCamera, imageCapture, mode, settings.qrEnabled) {
         if (!cameraGranted) return@LaunchedEffect
         previewReady = false
         val future = ProcessCameraProvider.getInstance(context)
@@ -416,9 +623,16 @@ fun CameraScreen(
                     imageCapture.setScreenFlash(
                         if (useFrontCamera) screenFlashView.screenFlash else null
                     )
-                    provider.bindToLifecycle(
-                        lifecycleOwner, selector, preview, imageCapture,
-                    )
+                    if (settings.qrEnabled) {
+                        provider.bindToLifecycle(
+                            lifecycleOwner, selector, preview, imageCapture,
+                            imageAnalysis,
+                        )
+                    } else {
+                        provider.bindToLifecycle(
+                            lifecycleOwner, selector, preview, imageCapture,
+                        )
+                    }
                 } else {
                     provider.bindToLifecycle(
                         lifecycleOwner, selector, preview, videoCapture,
@@ -549,6 +763,33 @@ fun CameraScreen(
                 if (t >= 1f) break
                 delay(16)
             }
+        }
+    }
+
+    // ---- QR のアクション（追加仕様 3.3: 開くのは http/https のみ） ----
+    val clipboardManager = LocalClipboardManager.current
+
+    fun copyQrText(text: String) {
+        clipboardManager.setText(AnnotatedString(text))
+    }
+
+    fun shareQrText(text: String) {
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
+        try {
+            context.startActivity(Intent.createChooser(intent, null))
+        } catch (e: Exception) {
+            errorStatus = "共有できませんでした"
+        }
+    }
+
+    fun openQrUrl(url: String) {
+        try {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (e: Exception) {
+            errorStatus = "リンクを開けませんでした"
         }
     }
 
@@ -934,6 +1175,43 @@ fun CameraScreen(
                     )
                 }
             }
+            // QR の検出枠とバナー（追加仕様 3.2: ファインダー上端の内側）
+            if (settings.qrEnabled && mode == ShootMode.PHOTO && !panelOpen) {
+                AnimatedVisibility(
+                    visible = qrTarget != null,
+                    enter = fadeIn(tween(120)),
+                    exit = fadeOut(tween(120)),
+                ) {
+                    Box(Modifier.fillMaxSize()) {
+                        qrShownTarget?.let { shown ->
+                            QrCornerFrame(rect = shown.rect)
+                        }
+                    }
+                }
+                AnimatedVisibility(
+                    visible = qrTarget != null,
+                    enter = fadeIn(tween(120)),
+                    exit = fadeOut(tween(120)),
+                    modifier = Modifier.align(Alignment.TopCenter),
+                ) {
+                    qrShownTarget?.let { shown ->
+                        QrBanner(
+                            target = shown,
+                            onOpen = {
+                                if (shown.openable) {
+                                    openQrUrl(shown.value)
+                                } else {
+                                    copyQrText(shown.value)
+                                }
+                            },
+                            onCopy = { copyQrText(shown.value) },
+                            onShare = { shareQrText(shown.value) },
+                            modifier = Modifier
+                                .padding(top = 9.dp, start = 23.dp, end = 23.dp),
+                        )
+                    }
+                }
+            }
             // ズームピル / ダイヤルはプレビューの内側下部（パネル開時は隠す）。
             // padding 計算では実機で位置が変わらなかったため、動画タイマーで
             // 実績のある offset 方式で +292px 下げ、中心を y=1737 に合わせる
@@ -1035,6 +1313,7 @@ fun CameraScreen(
                     onAspect = { scope.launch { settingsStore.setAspect(it) } },
                     onGrid = { scope.launch { settingsStore.setGridEnabled(it) } },
                     onLevel = { scope.launch { settingsStore.setLevelEnabled(it) } },
+                    onQrEnabled = { scope.launch { settingsStore.setQrEnabled(it) } },
                     onQuality = { scope.launch { settingsStore.setQuality(it) } },
                     onSoundEnabled = {
                         scope.launch { settingsStore.setSoundEnabled(it) }

@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.quietcamera"
         minSdk = 30
         targetSdk = 36
-        versionCode = 24
-        versionName = "1.0.0"
+        versionCode = 25
+        versionName = "1.1.0"
     }
 
     buildTypes {
@@ -54,6 +54,7 @@ dependencies {
     implementation(libs.androidx.camera.extensions)
     implementation(libs.androidx.camera.video)
     implementation(libs.androidx.datastore.preferences)
+    implementation(libs.mlkit.barcode.scanning)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
 }
