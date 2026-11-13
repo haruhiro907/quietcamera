@@ -799,7 +799,7 @@ fun SettingsPanel(
                 .padding(horizontal = 16.dp, vertical = 9.dp),
         ) {
             Text(
-                text = "アプリ設定（起動カメラ・ミラー保存・初期化）",
+                text = "アプリ設定",
                 color = Color.White,
                 fontSize = 12.sp,
             )

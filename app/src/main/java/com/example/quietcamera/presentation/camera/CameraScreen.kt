@@ -52,6 +52,8 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -64,6 +66,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -92,6 +95,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -176,6 +180,7 @@ fun CameraScreen(
         .firstOrNull { it.seconds == settings.timerSeconds } ?: TimerSetting.OFF
 
     var panelOpen by remember { mutableStateOf(false) }
+    val panelScrollState = rememberScrollState()
     var appSettingsOpen by remember { mutableStateOf(false) }
 
     // 動画モード（音声なし。マイク権限を要求しない）
@@ -911,18 +916,19 @@ fun CameraScreen(
                     )
                 }
             }
-            // ズームピル / ダイヤルはプレビューの内側下部に置く（iPhone と同じ）
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(
-                        bottom = if (settings.aspect == AspectSetting.RATIO_16_9) {
-                            131.dp
-                        } else {
-                            23.dp
-                        },
-                    ),
-            ) {
+            // ズームピル / ダイヤルはプレビューの内側下部（パネル開時は隠す）
+            if (!panelOpen) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(
+                            bottom = if (settings.aspect == AspectSetting.RATIO_16_9) {
+                                131.dp
+                            } else {
+                                21.dp
+                            },
+                        ),
+                ) {
                 if (dialOpen) {
                     ZoomDial(
                         minZoom = minZoom,
@@ -941,6 +947,7 @@ fun CameraScreen(
                         onStopSelected = { animateZoomTo(it) },
                         onDialOpen = { dialOpen = true },
                     )
+                    }
                 }
             }
         }
@@ -1028,7 +1035,16 @@ fun CameraScreen(
                         panelOpen = false
                         appSettingsOpen = true
                     },
-                    modifier = Modifier.padding(top = 8.dp),
+                    modifier = Modifier
+                        .padding(top = 8.dp)
+                        .heightIn(
+                            max = if (rootSize.height > 0) {
+                                (rootSize.height / density.density).dp - 238.dp
+                            } else {
+                                560.dp
+                            }.coerceAtLeast(200.dp),
+                        )
+                        .verticalScroll(panelScrollState),
                 )
             }
         }
@@ -1039,41 +1055,10 @@ fun CameraScreen(
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .padding(horizontal = 24.dp, vertical = 10.dp),
+                .padding(horizontal = 24.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            // モード帯（VIDEO / PHOTO）は下部黒帯の最上段（ユーザー提供図）
-            Row(
-                modifier = Modifier.padding(bottom = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(28.dp),
-            ) {
-                listOf(ShootMode.VIDEO, ShootMode.PHOTO).forEach { m ->
-                    val selected = mode == m
-                    Text(
-                        text = if (m == ShootMode.VIDEO) "VIDEO" else "PHOTO",
-                        color = if (selected) {
-                            AccentYellow
-                        } else {
-                            Color.White.copy(alpha = 0.55f)
-                        },
-                        fontSize = 11.sp,
-                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                        letterSpacing = 2.sp,
-                        style = TextStyle(
-                            shadow = Shadow(
-                                color = Color.Black.copy(alpha = 0.65f),
-                                offset = Offset(0f, 1f),
-                                blurRadius = 4f,
-                            ),
-                        ),
-                        modifier = Modifier
-                            .clickable(enabled = recording == null) { mode = m }
-                            .padding(horizontal = 4.dp, vertical = 2.dp),
-                    )
-                }
-            }
-            Spacer(Modifier.height(42.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1123,30 +1108,60 @@ fun CameraScreen(
                     onShutter = { onShutter() },
                 )
 
-                Box(
-                    modifier = Modifier.weight(1f),
-                    contentAlignment = Alignment.CenterEnd,
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clip(CircleShape)
-                            .background(Color.White.copy(alpha = 0.16f))
-                            .clickable(enabled = recording == null) {
-                                useFrontCamera = !useFrontCamera
-                            },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        CameraSwitchIcon(
-                            modifier = Modifier
-                                .size(26.dp)
-                                .graphicsLayer { rotationZ = animatedIconRotation },
-                        )
-                    }
-                }
+                Box(modifier = Modifier.weight(1f)) {}
             }
 
-            Spacer(Modifier.height(33.dp))
+            Spacer(Modifier.height(7.dp))
+            // 最下段: モード帯（中央）と切り替えボタン（右、小さめ）
+            Box(modifier = Modifier.fillMaxWidth()) {
+                // モード帯（VIDEO / PHOTO）は最下段の中央
+                Row(
+                    modifier = Modifier.align(Alignment.Center),
+                horizontalArrangement = Arrangement.spacedBy(28.dp),
+            ) {
+                listOf(ShootMode.VIDEO, ShootMode.PHOTO).forEach { m ->
+                    val selected = mode == m
+                    Text(
+                        text = if (m == ShootMode.VIDEO) "VIDEO" else "PHOTO",
+                        color = if (selected) {
+                            AccentYellow
+                        } else {
+                            Color.White.copy(alpha = 0.55f)
+                        },
+                        fontSize = 11.sp,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        letterSpacing = 2.sp,
+                        style = TextStyle(
+                            shadow = Shadow(
+                                color = Color.Black.copy(alpha = 0.65f),
+                                offset = Offset(0f, 1f),
+                                blurRadius = 4f,
+                            ),
+                        ),
+                        modifier = Modifier
+                            .clickable(enabled = recording == null) { mode = m }
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                    )
+                }
+            }
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.16f))
+                        .clickable(enabled = recording == null) {
+                            useFrontCamera = !useFrontCamera
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CameraSwitchIcon(
+                        modifier = Modifier
+                            .size(20.dp)
+                            .graphicsLayer { rotationZ = animatedIconRotation },
+                    )
+                }
+            }
         }
 
         // 撮影フィードバックの暗転は画面全体にかける（Phase 6 の指摘）
@@ -1280,19 +1295,19 @@ private fun ShutterButton(
 private fun CameraSwitchIcon(modifier: Modifier = Modifier) {
     Canvas(modifier = modifier) {
         val stroke = androidx.compose.ui.graphics.drawscope.Stroke(
-            width = 2.dp.toPx(),
+            width = size.minDimension * 0.09f,
             cap = StrokeCap.Round,
         )
         val cx = size.width / 2
         val cy = size.height / 2
-        val r = size.minDimension / 2 - 3.dp.toPx()
+        val r = size.minDimension / 2 - size.minDimension * 0.15f
         val topLeft = Offset(cx - r, cy - r)
         val arcSize = androidx.compose.ui.geometry.Size(r * 2, r * 2)
-        // 上の弧（-150°→-30°）と下の弧（30°→150°）
+        // 上の弧（190°→350°、天辺を通る）と下の弧（10°→170°、底を通る）
         drawArc(
             color = Color.White,
-            startAngle = -150f,
-            sweepAngle = 120f,
+            startAngle = 190f,
+            sweepAngle = 160f,
             useCenter = false,
             topLeft = topLeft,
             size = arcSize,
@@ -1300,33 +1315,36 @@ private fun CameraSwitchIcon(modifier: Modifier = Modifier) {
         )
         drawArc(
             color = Color.White,
-            startAngle = 30f,
-            sweepAngle = 120f,
+            startAngle = 10f,
+            sweepAngle = 160f,
             useCenter = false,
             topLeft = topLeft,
             size = arcSize,
             style = stroke,
         )
-        // 矢じり: 弧の終点から、進行方向（接線）の逆向き ±30° に 2 本線を引く
-        fun arrowHead(endDeg: Double) {
-            val rad = Math.toRadians(endDeg)
-            val tip = Offset(
-                cx + (r * kotlin.math.cos(rad)).toFloat(),
-                cy + (r * kotlin.math.sin(rad)).toFloat(),
-            )
-            val reverseTangent = endDeg + 90.0 + 180.0
-            val len = 5.5.dp.toPx()
-            for (spread in listOf(-30.0, 30.0)) {
-                val dir = Math.toRadians(reverseTangent + spread)
-                val end = Offset(
-                    tip.x + (len * kotlin.math.cos(dir)).toFloat(),
-                    tip.y + (len * kotlin.math.sin(dir)).toFloat(),
-                )
-                drawLine(Color.White, tip, end, 2.dp.toPx(), StrokeCap.Round)
-            }
-        }
-        arrowHead(-30.0)
-        arrowHead(150.0)
+        // 矢じりは塗りつぶしの三角。右（0°）は下向き、左（180°）は上向き
+        val ah = size.minDimension * 0.21f // 矢じりの長さ
+        val aw = size.minDimension * 0.17f // 矢じりの半幅
+        val rightTip = Offset(cx + r, cy)
+        drawPath(
+            Path().apply {
+                moveTo(rightTip.x, rightTip.y + ah)
+                lineTo(rightTip.x - aw, rightTip.y - ah * 0.65f)
+                lineTo(rightTip.x + aw, rightTip.y - ah * 0.65f)
+                close()
+            },
+            color = Color.White,
+        )
+        val leftTip = Offset(cx - r, cy)
+        drawPath(
+            Path().apply {
+                moveTo(leftTip.x, leftTip.y - ah)
+                lineTo(leftTip.x - aw, leftTip.y + ah * 0.65f)
+                lineTo(leftTip.x + aw, leftTip.y + ah * 0.65f)
+                close()
+            },
+            color = Color.White,
+        )
     }
 }
 
