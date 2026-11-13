@@ -31,6 +31,13 @@ Android 端末で、iPhone 標準カメラのような撮影体験を得るた�
 - minSdk 30、compileSdk / targetSdk 36
 - バージョンは `gradle/libs.versions.toml` で一元管理（AGP 9.5.1 / Kotlin 2.4.21 / CameraX 1.6.2 / Compose BOM 2026.09.00 / ML Kit Barcode Scanning 17.3.0）
 
+### 技術構成図
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.png">
+  <img alt="Quiet Camera の技術構成図" src="docs/images/architecture.png">
+</picture>
+
 ## 設計思想
 
 - **体験全体を再現する**： 見た目だけでなく、撮影操作・アニメーション・シャッター音・触覚フィードバックまで含めて「カメラを使う体験」を再現対象とする（設計書 1.1）
