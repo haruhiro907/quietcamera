@@ -109,6 +109,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -210,6 +211,7 @@ fun CameraScreen(
     var previewReady by remember { mutableStateOf(false) }
     var previewSize by remember { mutableStateOf(IntSize.Zero) }
     var rootSize by remember { mutableStateOf(IntSize.Zero) }
+    var pillSize by remember { mutableStateOf(IntSize.Zero) }
     var errorStatus by remember { mutableStateOf<String?>(null) }
     var flashVisible by remember { mutableStateOf(false) }
 
@@ -780,6 +782,19 @@ fun CameraScreen(
     // 横幅×アスペクトで固定し、残りの高さを上 375 : 下 537 で分ける。
     // ファインダー実高は onSizeChanged の実測値で補正する（16:9 でも追随）。
     val density = LocalDensity.current
+    // ユーザー指定のデバイス座標（1080x2400 基準）へ合わせるための換算。
+    // 要素の「中心 y」を指定すると、下端からのパディングを返す
+    val effRootH = if (rootSize.height > 0) rootSize.height else 2400
+    val effRootW = if (rootSize.width > 0) rootSize.width else 1080
+    fun bottomPadForCenterY(targetY: Float, half: Dp): Dp {
+        val yPx = targetY * (effRootH / 2400f)
+        return ((effRootH - yPx) / density.density).dp - half
+    }
+    fun endPadForCenterX(targetX: Float, half: Dp): Dp {
+        val xPx = targetX * (effRootW / 1080f)
+        return ((effRootW - xPx) / density.density).dp - half
+    }
+
     val previewTopOffset = if (rootSize.height > 0 && previewSize.height > 0) {
         val rootDp = rootSize.height / density.density
         val finderDp = previewSize.height / density.density
@@ -916,18 +931,23 @@ fun CameraScreen(
                     )
                 }
             }
-            // ズームピル / ダイヤルはプレビューの内側下部（パネル開時は隠す）
+            // ズームピル / ダイヤルはプレビューの内側下部（パネル開時は隠す）。
+            // 中心がデバイス座標 y=1738 に来るよう、実測サイズからインセットを出す
+            val pillInset = if (previewSize.height > 0 && pillSize.height > 0) {
+                val finderBottomPx = with(density) { previewTopOffset.toPx() } +
+                    previewSize.height
+                val centerPx = 1738f * (effRootH / 2400f)
+                ((finderBottomPx - centerPx - pillSize.height / 2f) /
+                    density.density).dp.coerceAtLeast(0.dp)
+            } else {
+                15.dp
+            }
             if (!panelOpen) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(
-                            bottom = if (settings.aspect == AspectSetting.RATIO_16_9) {
-                                131.dp
-                            } else {
-                                21.dp
-                            },
-                        ),
+                        .padding(bottom = pillInset)
+                        .onSizeChanged { pillSize = it },
                 ) {
                 if (dialOpen) {
                     ZoomDial(
@@ -1049,18 +1069,18 @@ fun CameraScreen(
             }
         }
 
-        // 下部: モード帯 + コントロール行（黒帯 593px = 226dp の内訳）
-        Column(
+        // 下部要素はユーザー指定のデバイス座標（1080x2400 基準）で配置する
+        // 操作行: シャッター中心 y=1975
+        Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(horizontal = 24.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally,
+                .padding(bottom = bottomPadForCenterY(1975f, 34.dp)),
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(
@@ -1110,13 +1130,15 @@ fun CameraScreen(
 
                 Box(modifier = Modifier.weight(1f)) {}
             }
+        }
 
-            Spacer(Modifier.height(7.dp))
-            // 最下段: モード帯（中央）と切り替えボタン（右、小さめ）
-            Box(modifier = Modifier.fillMaxWidth()) {
-                // モード帯（VIDEO / PHOTO）は最下段の中央
-                Row(
-                    modifier = Modifier.align(Alignment.Center),
+        // モード帯: 中心 y=2261
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = bottomPadForCenterY(2261f, 11.dp)),
+        ) {
+            Row(
                 horizontalArrangement = Arrangement.spacedBy(28.dp),
             ) {
                 listOf(ShootMode.VIDEO, ShootMode.PHOTO).forEach { m ->
@@ -1144,24 +1166,29 @@ fun CameraScreen(
                     )
                 }
             }
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.CenterEnd)
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.16f))
-                        .clickable(enabled = recording == null) {
-                            useFrontCamera = !useFrontCamera
-                        },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    CameraSwitchIcon(
-                        modifier = Modifier
-                            .size(20.dp)
-                            .graphicsLayer { rotationZ = animatedIconRotation },
-                    )
-                }
-            }
+        }
+
+        // 切り替えボタン: 中心 (896, 2171)
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(
+                    end = endPadForCenterX(896f, 18.dp),
+                    bottom = bottomPadForCenterY(2171f, 18.dp),
+                )
+                .size(36.dp)
+                .clip(CircleShape)
+                .background(Color.White.copy(alpha = 0.16f))
+                .clickable(enabled = recording == null) {
+                    useFrontCamera = !useFrontCamera
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            CameraSwitchIcon(
+                modifier = Modifier
+                    .size(20.dp)
+                    .graphicsLayer { rotationZ = animatedIconRotation },
+            )
         }
 
         // 撮影フィードバックの暗転は画面全体にかける（Phase 6 の指摘）
