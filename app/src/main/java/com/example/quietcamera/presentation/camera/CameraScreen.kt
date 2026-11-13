@@ -45,7 +45,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -534,10 +535,31 @@ fun CameraScreen(
         focusVisible = true
     }
 
+    // 押下時点でフィードバック済みなら、撮影時の再生を 1 回だけ抑止する
+    var suppressCaptureFeedback by remember { mutableStateOf(false) }
+
+    /**
+     * シャッターを押した瞬間のフィードバック（音・触覚・全画面の暗転）。
+     * 撮影完了を待たずに反応させることで体感の遅延をなくす（Phase 6 の指摘）。
+     * タイマー撮影とカウントダウンのキャンセルでは鳴らさない。
+     */
+    fun onShutterPressStart() {
+        if (countdown == null && timerSetting == TimerSetting.OFF) {
+            playShutterFeedback()
+            flashVisible = true
+            suppressCaptureFeedback = true
+        }
+    }
+
     fun doCapture() {
         if (!previewReady || capturing) return
         capturing = true
-        playShutterFeedback() // 5.2: シャッターを離した瞬間に音と触覚
+        if (suppressCaptureFeedback) {
+            suppressCaptureFeedback = false
+        } else {
+            playShutterFeedback()
+            flashVisible = true
+        }
         if (settings.aspect == AspectSetting.RATIO_1_1) {
             // 1:1 は一時ファイルへ撮り、中央を正方形に切り抜いて保存する
             val file = File(context.cacheDir, "qc_capture_tmp.jpg")
@@ -561,7 +583,6 @@ fun CameraScreen(
                             }
                             capturing = false
                             if (uri != null) {
-                                flashVisible = true
                                 lastSavedUri = uri
                             } else {
                                 errorStatus = "保存に失敗しました"
@@ -587,7 +608,6 @@ fun CameraScreen(
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                     capturing = false
-                    flashVisible = true
                     lastSavedUri = output.savedUri ?: lastSavedUri
                 }
 
@@ -597,6 +617,24 @@ fun CameraScreen(
                 }
             },
         )
+    }
+
+    // 長押し連続撮影（Phase 6 で追加）
+    var burstJob by remember { mutableStateOf<Job?>(null) }
+    fun startBurst() {
+        if (countdown != null || timerSetting != TimerSetting.OFF) return
+        if (burstJob?.isActive == true) return
+        burstJob = scope.launch {
+            while (true) {
+                doCapture()
+                delay(300)
+            }
+        }
+    }
+
+    fun stopBurst() {
+        burstJob?.cancel()
+        burstJob = null
     }
 
     fun onShutter() {
@@ -688,13 +726,6 @@ fun CameraScreen(
                     )
                 }
             }
-            if (flashVisible) {
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.45f)),
-                )
-            }
             if (settings.gridEnabled) {
                 GridOverlay()
             }
@@ -757,20 +788,8 @@ fun CameraScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        TopBarButton(onClick = { flashMenuOpen = !flashMenuOpen }) {
-                            BoltIcon(mode = flashMode, modifier = Modifier.size(20.dp))
-                        }
-                        if (flashMenuOpen) {
-                            FlashMenu(
-                                current = flashMode,
-                                onSelect = {
-                                    scope.launch { settingsStore.setFlashMode(it) }
-                                    flashMenuOpen = false
-                                },
-                                modifier = Modifier.padding(start = 8.dp),
-                            )
-                        }
+                    TopBarButton(onClick = { flashMenuOpen = !flashMenuOpen }) {
+                        BoltIcon(mode = flashMode, modifier = Modifier.size(20.dp))
                     }
                 }
                 TopBarButton(
@@ -817,6 +836,19 @@ fun CameraScreen(
                         }
                     }
                 }
+            }
+
+            // フラッシュメニューはバーの下にドロップダウン表示する
+            // （バー内に横並びすると幅が足りず表示が崩れるため）
+            if (flashMenuOpen) {
+                FlashMenu(
+                    current = flashMode,
+                    onSelect = {
+                        scope.launch { settingsStore.setFlashMode(it) }
+                        flashMenuOpen = false
+                    },
+                    modifier = Modifier.padding(top = 8.dp, start = 2.dp),
+                )
             }
 
             // 設定パネル（3.4: 約 300ms のスプリングで展開）
@@ -920,9 +952,13 @@ fun CameraScreen(
 
                 ShutterButton(
                     enabled = previewReady,
+                    burstEnabled = countdown == null && timerSetting == TimerSetting.OFF,
                     pressed = shutterPressed,
                     capturing = capturing || countdown != null,
                     onPressedChange = { shutterPressed = it },
+                    onPressStart = { onShutterPressStart() },
+                    onBurstStart = { startBurst() },
+                    onBurstEnd = { stopBurst() },
                     onShutter = { onShutter() },
                 )
 
@@ -956,6 +992,15 @@ fun CameraScreen(
             )
         }
 
+        // 撮影フィードバックの暗転は画面全体にかける（Phase 6 の指摘）
+        if (flashVisible) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.45f)),
+            )
+        }
+
         // アプリ設定画面（10.3）
         if (appSettingsOpen) {
             AppSettingsScreen(
@@ -979,15 +1024,23 @@ fun CameraScreen(
     }
 }
 
-/** iPhone 風シャッターボタン（設計書 4.1）。 */
+/**
+ * iPhone 風シャッターボタン（設計書 4.1）。
+ * 短いタップは離した瞬間に 1 枚、400ms 以上の長押しは連続撮影になる（Phase 6）。
+ */
 @Composable
 private fun ShutterButton(
     enabled: Boolean,
+    burstEnabled: Boolean,
     pressed: Boolean,
     capturing: Boolean,
     onPressedChange: (Boolean) -> Unit,
+    onPressStart: () -> Unit,
+    onBurstStart: () -> Unit,
+    onBurstEnd: () -> Unit,
     onShutter: () -> Unit,
 ) {
+    val buttonScope = rememberCoroutineScope()
     val innerScale by animateFloatAsState(
         targetValue = if (pressed || capturing) 0.92f else 1f,
         animationSpec = spring(
@@ -999,15 +1052,33 @@ private fun ShutterButton(
     Box(
         modifier = Modifier
             .size(76.dp)
-            .pointerInput(enabled) {
-                detectTapGestures(
-                    onPress = {
-                        onPressedChange(true)
-                        val released = tryAwaitRelease()
-                        onPressedChange(false)
-                        if (released && enabled) onShutter()
-                    },
-                )
+            .pointerInput(enabled, burstEnabled) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    onPressedChange(true)
+                    onPressStart()
+                    var burst = false
+                    val burstTimer = if (burstEnabled) {
+                        buttonScope.launch {
+                            delay(400)
+                            burst = true
+                            onBurstStart()
+                        }
+                    } else {
+                        null
+                    }
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        if (event.changes.none { it.pressed }) break
+                    }
+                    burstTimer?.cancel()
+                    onPressedChange(false)
+                    if (burst) {
+                        onBurstEnd()
+                    } else if (enabled) {
+                        onShutter()
+                    }
+                }
             },
         contentAlignment = Alignment.Center,
     ) {
@@ -1029,7 +1100,7 @@ private fun ShutterButton(
     }
 }
 
-/** カメラ切替アイコン。 */
+/** カメラ切替アイコン。2 本の円弧と、接線方向に付けた矢じりで描く。 */
 @Composable
 private fun CameraSwitchIcon(modifier: Modifier = Modifier) {
     Canvas(modifier = modifier) {
@@ -1037,59 +1108,50 @@ private fun CameraSwitchIcon(modifier: Modifier = Modifier) {
             width = 2.dp.toPx(),
             cap = StrokeCap.Round,
         )
-        val inset = 3.dp.toPx()
-        val arcSize = androidx.compose.ui.geometry.Size(
-            size.width - inset * 2,
-            size.height - inset * 2,
-        )
-        val topLeft = Offset(inset, inset)
-        drawArc(
-            color = Color.White,
-            startAngle = -30f,
-            sweepAngle = 150f,
-            useCenter = false,
-            topLeft = topLeft,
-            size = arcSize,
-            style = stroke,
-        )
-        drawArc(
-            color = Color.White,
-            startAngle = 150f,
-            sweepAngle = 150f,
-            useCenter = false,
-            topLeft = topLeft,
-            size = arcSize,
-            style = stroke,
-        )
         val cx = size.width / 2
         val cy = size.height / 2
-        val r = size.width / 2 - inset
-        val a1 = Math.toRadians(-30.0)
-        val p1 = Offset(
-            cx + (r * kotlin.math.cos(a1)).toFloat(),
-            cy + (r * kotlin.math.sin(a1)).toFloat(),
+        val r = size.minDimension / 2 - 3.dp.toPx()
+        val topLeft = Offset(cx - r, cy - r)
+        val arcSize = androidx.compose.ui.geometry.Size(r * 2, r * 2)
+        // 上の弧（-150°→-30°）と下の弧（30°→150°）
+        drawArc(
+            color = Color.White,
+            startAngle = -150f,
+            sweepAngle = 120f,
+            useCenter = false,
+            topLeft = topLeft,
+            size = arcSize,
+            style = stroke,
         )
-        drawLine(
-            Color.White, p1, p1 + Offset(-6.dp.toPx(), 1.dp.toPx()),
-            2.dp.toPx(), StrokeCap.Round,
+        drawArc(
+            color = Color.White,
+            startAngle = 30f,
+            sweepAngle = 120f,
+            useCenter = false,
+            topLeft = topLeft,
+            size = arcSize,
+            style = stroke,
         )
-        drawLine(
-            Color.White, p1, p1 + Offset(-1.dp.toPx(), 6.dp.toPx()),
-            2.dp.toPx(), StrokeCap.Round,
-        )
-        val a2 = Math.toRadians(150.0)
-        val p2 = Offset(
-            cx + (r * kotlin.math.cos(a2)).toFloat(),
-            cy + (r * kotlin.math.sin(a2)).toFloat(),
-        )
-        drawLine(
-            Color.White, p2, p2 + Offset(6.dp.toPx(), -1.dp.toPx()),
-            2.dp.toPx(), StrokeCap.Round,
-        )
-        drawLine(
-            Color.White, p2, p2 + Offset(1.dp.toPx(), -6.dp.toPx()),
-            2.dp.toPx(), StrokeCap.Round,
-        )
+        // 矢じり: 弧の終点から、進行方向（接線）の逆向き ±30° に 2 本線を引く
+        fun arrowHead(endDeg: Double) {
+            val rad = Math.toRadians(endDeg)
+            val tip = Offset(
+                cx + (r * kotlin.math.cos(rad)).toFloat(),
+                cy + (r * kotlin.math.sin(rad)).toFloat(),
+            )
+            val reverseTangent = endDeg + 90.0 + 180.0
+            val len = 5.5.dp.toPx()
+            for (spread in listOf(-30.0, 30.0)) {
+                val dir = Math.toRadians(reverseTangent + spread)
+                val end = Offset(
+                    tip.x + (len * kotlin.math.cos(dir)).toFloat(),
+                    tip.y + (len * kotlin.math.sin(dir)).toFloat(),
+                )
+                drawLine(Color.White, tip, end, 2.dp.toPx(), StrokeCap.Round)
+            }
+        }
+        arrowHead(-30.0)
+        arrowHead(150.0)
     }
 }
 
