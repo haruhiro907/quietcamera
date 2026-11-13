@@ -935,19 +935,15 @@ fun CameraScreen(
                 }
             }
             // ズームピル / ダイヤルはプレビューの内側下部（パネル開時は隠す）。
-            // 中心はファインダー下端から 92px 上（ユーザーの黄色マーカー中心
-            // y=1737、下端 1829 との差から算出）。下端基準の相対配置にする
-            val pillInset = if (pillSize.height > 0) {
-                ((92f - pillSize.height / 2f) / density.density).dp
-                    .coerceAtLeast(0.dp)
-            } else {
-                13.dp
-            }
+            // padding 計算では実機で位置が変わらなかったため、動画タイマーで
+            // 実績のある offset 方式で +292px 下げ、中心を y=1737 に合わせる
+            val pillInset = 13.dp
             if (!panelOpen) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .padding(bottom = pillInset)
+                        .offset(y = (292f / density.density).dp)
                         .onSizeChanged { pillSize = it },
                 ) {
                 if (dialOpen) {
