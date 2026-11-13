@@ -164,6 +164,50 @@ object MediaStoreManager {
     }
 
     /**
+     * DCIM/QuietCamera 内の最新メディア（写真・動画の新しい方）を返す。
+     * 左下サムネイル用。動画も写真と同じ場所に保存するので同じ条件で拾える。
+     * 呼び出しは IO スレッドで行うこと。
+     */
+    fun latestMediaUri(resolver: ContentResolver): Uri? {
+        fun newest(collection: Uri, idColumn: String, dateColumn: String, pathColumn: String): Pair<Uri, Long>? {
+            val projection = arrayOf(idColumn, dateColumn)
+            val selection = "$pathColumn LIKE ?"
+            val args = arrayOf("DCIM/QuietCamera%")
+            return try {
+                resolver.query(
+                    collection, projection, selection, args, "$dateColumn DESC",
+                )?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        ContentUris.withAppendedId(collection, cursor.getLong(0)) to
+                            cursor.getLong(1)
+                    } else {
+                        null
+                    }
+                }
+            } catch (e: Exception) {
+                null
+            }
+        }
+        val photo = newest(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            MediaStore.Images.Media._ID,
+            MediaStore.Images.Media.DATE_ADDED,
+            MediaStore.Images.Media.RELATIVE_PATH,
+        )
+        val video = newest(
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            MediaStore.Video.Media._ID,
+            MediaStore.Video.Media.DATE_ADDED,
+            MediaStore.Video.Media.RELATIVE_PATH,
+        )
+        return when {
+            photo == null -> video?.first
+            video == null -> photo.first
+            else -> if (video.second >= photo.second) video.first else photo.first
+        }
+    }
+
+    /**
      * 自アプリが保存した最新の写真の URI を返す（7.3 のサムネイル初期表示用）。
      * 自分のメディアへのクエリなので読み取り権限は不要。呼び出しは IO スレッドで行うこと。
      */

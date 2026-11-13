@@ -87,6 +87,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -97,6 +98,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -175,7 +177,6 @@ fun CameraScreen(
     var mode by remember { mutableStateOf(ShootMode.PHOTO) }
     var recording by remember { mutableStateOf<Recording?>(null) }
     var recordSeconds by remember { mutableIntStateOf(0) }
-    var torchOn by remember { mutableStateOf(false) }
     val videoCapture = remember {
         val recorder = Recorder.Builder()
             .setQualitySelector(QualitySelector.from(Quality.HIGHEST))
@@ -441,6 +442,13 @@ fun CameraScreen(
         }
     }
 
+    // 動画モードではフラッシュ ON 設定をトーチ（ライト）として使う
+    LaunchedEffect(mode, flashMode, camera) {
+        if (mode == ShootMode.VIDEO) {
+            camera?.cameraControl?.enableTorch(flashMode == FlashMode.ON)
+        }
+    }
+
     // フラッシュモードを ImageCapture へ反映する
     LaunchedEffect(flashMode, imageCapture) {
         imageCapture.flashMode = when (flashMode) {
@@ -452,7 +460,7 @@ fun CameraScreen(
 
     LaunchedEffect(Unit) {
         val uri = withContext(Dispatchers.IO) {
-            MediaStoreManager.latestPhotoUri(context.contentResolver)
+            MediaStoreManager.latestMediaUri(context.contentResolver)
         }
         if (uri != null && lastSavedUri == null) lastSavedUri = uri
     }
@@ -678,7 +686,7 @@ fun CameraScreen(
         }
     }
 
-    /** 動画の録画開始 / 停止。保存先は Movies/QuietCamera。 */
+    /** 動画の録画開始 / 停止。保存先は写真と同じ DCIM/QuietCamera。 */
     fun toggleRecording() {
         val active = recording
         if (active != null) {
@@ -694,7 +702,7 @@ fun CameraScreen(
                 MediaStoreManager.nextVideoDisplayName(),
             )
             put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-            put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/QuietCamera")
+            put(MediaStore.Video.Media.RELATIVE_PATH, "DCIM/QuietCamera")
             put(MediaStore.Video.Media.IS_PENDING, 1)
         }
         val options = MediaStoreOutputOptions.Builder(
@@ -707,10 +715,11 @@ fun CameraScreen(
             .start(ContextCompat.getMainExecutor(context)) { event ->
                 if (event is VideoRecordEvent.Finalize) {
                     recording = null
-                    errorStatus = if (event.hasError()) {
-                        "動画の保存に失敗しました"
+                    if (event.hasError()) {
+                        errorStatus = "動画の保存に失敗しました"
                     } else {
-                        "動画を保存しました"
+                        errorStatus = "動画を保存しました"
+                        lastSavedUri = event.outputResults.outputUri
                     }
                 }
             }
@@ -746,7 +755,7 @@ fun CameraScreen(
         val uri = lastSavedUri ?: return
         if (keyguardLocked) return // 4.8: ロック中は写真アプリを開かない
         val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "image/*")
+            setDataAndType(uri, context.contentResolver.getType(uri) ?: "*/*")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         try {
@@ -786,7 +795,7 @@ fun CameraScreen(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
-                .padding(top = 64.dp)
+                .padding(top = 104.dp)
                 .fillMaxWidth()
                 .aspectRatio(previewRatio)
                 .onSizeChanged { previewSize = it }
@@ -890,9 +899,9 @@ fun CameraScreen(
                     .align(Alignment.BottomCenter)
                     .padding(
                         bottom = if (settings.aspect == AspectSetting.RATIO_16_9) {
-                            96.dp
+                            148.dp
                         } else {
-                            12.dp
+                            52.dp
                         },
                     ),
             ) {
@@ -916,6 +925,44 @@ fun CameraScreen(
                     )
                 }
             }
+            // モード帯（VIDEO / PHOTO）は写真の下端に重ねる（iPhone と同じ）
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(
+                        bottom = if (settings.aspect == AspectSetting.RATIO_16_9) {
+                            98.dp
+                        } else {
+                            2.dp
+                        },
+                    ),
+                horizontalArrangement = Arrangement.spacedBy(28.dp),
+            ) {
+                listOf(ShootMode.VIDEO, ShootMode.PHOTO).forEach { m ->
+                    val selected = mode == m
+                    Text(
+                        text = if (m == ShootMode.VIDEO) "VIDEO" else "PHOTO",
+                        color = if (selected) {
+                            AccentYellow
+                        } else {
+                            Color.White.copy(alpha = 0.55f)
+                        },
+                        fontSize = 11.sp,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        letterSpacing = 2.sp,
+                        style = TextStyle(
+                            shadow = Shadow(
+                                color = Color.Black.copy(alpha = 0.65f),
+                                offset = Offset(0f, 1f),
+                                blurRadius = 4f,
+                            ),
+                        ),
+                        modifier = Modifier
+                            .clickable(enabled = recording == null) { mode = m }
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                    )
+                }
+            }
         }
 
         // 上部バー + 設定パネル（3.2: 左フラッシュ / 中央シェブロン / 右タイマー・歯車）
@@ -931,24 +978,8 @@ fun CameraScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                    TopBarButton(
-                        onClick = {
-                            if (mode == ShootMode.VIDEO) {
-                                torchOn = !torchOn
-                                camera?.cameraControl?.enableTorch(torchOn)
-                            } else {
-                                flashMenuOpen = !flashMenuOpen
-                            }
-                        },
-                    ) {
-                        BoltIcon(
-                            mode = if (mode == ShootMode.VIDEO) {
-                                if (torchOn) FlashMode.ON else FlashMode.OFF
-                            } else {
-                                flashMode
-                            },
-                            modifier = Modifier.size(20.dp),
-                        )
+                    TopBarButton(onClick = { flashMenuOpen = !flashMenuOpen }) {
+                        BoltIcon(mode = flashMode, modifier = Modifier.size(20.dp))
                     }
                 }
                 TopBarButton(
@@ -1104,28 +1135,6 @@ fun CameraScreen(
                 }
             }
 
-            Row(
-                modifier = Modifier.padding(top = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(28.dp),
-            ) {
-                listOf(ShootMode.VIDEO, ShootMode.PHOTO).forEach { m ->
-                    val selected = mode == m
-                    Text(
-                        text = if (m == ShootMode.VIDEO) "VIDEO" else "PHOTO",
-                        color = if (selected) {
-                            AccentYellow
-                        } else {
-                            Color.White.copy(alpha = 0.55f)
-                        },
-                        fontSize = 11.sp,
-                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                        letterSpacing = 2.sp,
-                        modifier = Modifier
-                            .clickable(enabled = recording == null) { mode = m }
-                            .padding(horizontal = 4.dp, vertical = 2.dp),
-                    )
-                }
-            }
         }
 
         // 撮影フィードバックの暗転は画面全体にかける（Phase 6 の指摘）
