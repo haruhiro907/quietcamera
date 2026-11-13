@@ -204,6 +204,7 @@ fun CameraScreen(
 
     var previewReady by remember { mutableStateOf(false) }
     var previewSize by remember { mutableStateOf(IntSize.Zero) }
+    var rootSize by remember { mutableStateOf(IntSize.Zero) }
     var errorStatus by remember { mutableStateOf<String?>(null) }
     var flashVisible by remember { mutableStateOf(false) }
 
@@ -770,13 +771,17 @@ fun CameraScreen(
         }
     }
 
-    // 上部の黒帯はステータスバー込みで 140dp（Reno7 A 1080x2400 の 367px 相当、
-    // ユーザー提供のレイアウト図 2026-11-13）。実インセットから残りを出す
+    // 黒帯の配分（ユーザー提供図 2026-11-13 の再構成）: ファインダー高さは
+    // 横幅×アスペクトで固定し、残りの高さを上 375 : 下 537 で分ける。
+    // ファインダー実高は onSizeChanged の実測値で補正する（16:9 でも追随）。
     val density = LocalDensity.current
-    val statusBarTop = with(density) {
-        WindowInsets.statusBars.getTop(density).toDp()
+    val previewTopOffset = if (rootSize.height > 0 && previewSize.height > 0) {
+        val rootDp = rootSize.height / density.density
+        val finderDp = previewSize.height / density.density
+        ((rootDp - finderDp) * (375f / 912f)).dp.coerceAtLeast(0.dp)
+    } else {
+        140.dp
     }
-    val previewTopOffset = (140.dp - statusBarTop).coerceAtLeast(0.dp)
 
     val zoomStops = remember(minZoom, maxZoom) {
         // 設計書 4.2 の表（0.6 / 1 / 2 + 端末の最大倍率）。範囲外の倍率は表示しない
@@ -801,7 +806,8 @@ fun CameraScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Color.Black),
+            .background(Color.Black)
+            .onSizeChanged { rootSize = it },
     ) {
         // プレビュー（アスペクト比で配置が変わる、3.2）+ ジェスチャ + オーバーレイ
         Box(
@@ -911,9 +917,9 @@ fun CameraScreen(
                     .align(Alignment.BottomCenter)
                     .padding(
                         bottom = if (settings.aspect == AspectSetting.RATIO_16_9) {
-                            148.dp
+                            131.dp
                         } else {
-                            52.dp
+                            23.dp
                         },
                     ),
             ) {
@@ -1067,6 +1073,7 @@ fun CameraScreen(
                     )
                 }
             }
+            Spacer(Modifier.height(42.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1139,7 +1146,7 @@ fun CameraScreen(
                 }
             }
 
-            Spacer(Modifier.height(82.dp))
+            Spacer(Modifier.height(33.dp))
         }
 
         // 撮影フィードバックの暗転は画面全体にかける（Phase 6 の指摘）
