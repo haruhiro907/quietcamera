@@ -102,6 +102,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -212,6 +213,7 @@ fun CameraScreen(
     var previewSize by remember { mutableStateOf(IntSize.Zero) }
     var rootSize by remember { mutableStateOf(IntSize.Zero) }
     var pillSize by remember { mutableStateOf(IntSize.Zero) }
+    var finderBottomRootPx by remember { mutableStateOf(0) }
     var errorStatus by remember { mutableStateOf<String?>(null) }
     var flashVisible by remember { mutableStateOf(false) }
 
@@ -837,6 +839,10 @@ fun CameraScreen(
                 .fillMaxWidth()
                 .aspectRatio(previewRatio)
                 .onSizeChanged { previewSize = it }
+                .onGloballyPositioned {
+                    finderBottomRootPx =
+                        (it.localToRoot(Offset.Zero).y + it.size.height).toInt()
+                }
                 .previewGestures(
                     onTapFocus = { focusAt(it, lock = false) },
                     onLongPressLock = { focusAt(it, lock = true) },
@@ -932,12 +938,11 @@ fun CameraScreen(
                 }
             }
             // ズームピル / ダイヤルはプレビューの内側下部（パネル開時は隠す）。
-            // 中心がデバイス座標 y=1700 に来るよう、実測サイズからインセットを出す
-            val pillInset = if (previewSize.height > 0 && pillSize.height > 0) {
-                val finderBottomPx = with(density) { previewTopOffset.toPx() } +
-                    previewSize.height
+            // 中心がデバイス座標 y=1700 に来るよう、レイアウト実測の
+            // ファインダー下端（ルート座標）からインセットを出す
+            val pillInset = if (finderBottomRootPx > 0 && pillSize.height > 0) {
                 val centerPx = 1700f * (effRootH / 2400f)
-                ((finderBottomPx - centerPx - pillSize.height / 2f) /
+                ((finderBottomRootPx - centerPx - pillSize.height / 2f) /
                     density.density).dp.coerceAtLeast(0.dp)
             } else {
                 15.dp

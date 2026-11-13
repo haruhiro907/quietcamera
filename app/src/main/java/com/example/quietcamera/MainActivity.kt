@@ -47,6 +47,13 @@ setShowWhenLocked(true)
 setTurnScreenOn(true)
 }
 
+// 画面最下部のナビゲーションバー領域も黒で統一する（標準だと白くなる）
+window.navigationBarColor = android.graphics.Color.BLACK
+window.statusBarColor = android.graphics.Color.BLACK
+window.isNavigationBarContrastEnforced = false
+androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
+.isAppearanceLightNavigationBars = false
+
 setContent {
 QuietCameraTheme {
 Surface(
