@@ -60,13 +60,17 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -96,6 +100,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
@@ -765,6 +770,14 @@ fun CameraScreen(
         }
     }
 
+    // 上部の黒帯はステータスバー込みで 140dp（Reno7 A 1080x2400 の 367px 相当、
+    // ユーザー提供のレイアウト図 2026-11-13）。実インセットから残りを出す
+    val density = LocalDensity.current
+    val statusBarTop = with(density) {
+        WindowInsets.statusBars.getTop(density).toDp()
+    }
+    val previewTopOffset = (140.dp - statusBarTop).coerceAtLeast(0.dp)
+
     val zoomStops = remember(minZoom, maxZoom) {
         // 設計書 4.2 の表（0.6 / 1 / 2 + 端末の最大倍率）。範囲外の倍率は表示しない
         val base = listOf(0.6f, 1.0f, 2.0f)
@@ -794,8 +807,7 @@ fun CameraScreen(
         Box(
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .statusBarsPadding()
-                .padding(top = 104.dp)
+                .padding(top = previewTopOffset)
                 .fillMaxWidth()
                 .aspectRatio(previewRatio)
                 .onSizeChanged { previewSize = it }
@@ -925,44 +937,6 @@ fun CameraScreen(
                     )
                 }
             }
-            // モード帯（VIDEO / PHOTO）は写真の下端に重ねる（iPhone と同じ）
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(
-                        bottom = if (settings.aspect == AspectSetting.RATIO_16_9) {
-                            98.dp
-                        } else {
-                            2.dp
-                        },
-                    ),
-                horizontalArrangement = Arrangement.spacedBy(28.dp),
-            ) {
-                listOf(ShootMode.VIDEO, ShootMode.PHOTO).forEach { m ->
-                    val selected = mode == m
-                    Text(
-                        text = if (m == ShootMode.VIDEO) "VIDEO" else "PHOTO",
-                        color = if (selected) {
-                            AccentYellow
-                        } else {
-                            Color.White.copy(alpha = 0.55f)
-                        },
-                        fontSize = 11.sp,
-                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                        letterSpacing = 2.sp,
-                        style = TextStyle(
-                            shadow = Shadow(
-                                color = Color.Black.copy(alpha = 0.65f),
-                                offset = Offset(0f, 1f),
-                                blurRadius = 4f,
-                            ),
-                        ),
-                        modifier = Modifier
-                            .clickable(enabled = recording == null) { mode = m }
-                            .padding(horizontal = 4.dp, vertical = 2.dp),
-                    )
-                }
-            }
         }
 
         // 上部バー + 設定パネル（3.2: 左フラッシュ / 中央シェブロン / 右タイマー・歯車）
@@ -1053,7 +1027,7 @@ fun CameraScreen(
             }
         }
 
-        // 下部: ズームピル + コントロール行 + PHOTO
+        // 下部: モード帯 + コントロール行（黒帯 593px = 226dp の内訳）
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -1063,6 +1037,36 @@ fun CameraScreen(
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            // モード帯（VIDEO / PHOTO）は下部黒帯の最上段（ユーザー提供図）
+            Row(
+                modifier = Modifier.padding(bottom = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(28.dp),
+            ) {
+                listOf(ShootMode.VIDEO, ShootMode.PHOTO).forEach { m ->
+                    val selected = mode == m
+                    Text(
+                        text = if (m == ShootMode.VIDEO) "VIDEO" else "PHOTO",
+                        color = if (selected) {
+                            AccentYellow
+                        } else {
+                            Color.White.copy(alpha = 0.55f)
+                        },
+                        fontSize = 11.sp,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        letterSpacing = 2.sp,
+                        style = TextStyle(
+                            shadow = Shadow(
+                                color = Color.Black.copy(alpha = 0.65f),
+                                offset = Offset(0f, 1f),
+                                blurRadius = 4f,
+                            ),
+                        ),
+                        modifier = Modifier
+                            .clickable(enabled = recording == null) { mode = m }
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                    )
+                }
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1135,6 +1139,7 @@ fun CameraScreen(
                 }
             }
 
+            Spacer(Modifier.height(82.dp))
         }
 
         // 撮影フィードバックの暗転は画面全体にかける（Phase 6 の指摘）
@@ -1198,7 +1203,7 @@ private fun ShutterButton(
     )
     Box(
         modifier = Modifier
-            .size(76.dp)
+            .size(68.dp)
             .pointerInput(enabled, burstEnabled) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
@@ -1231,21 +1236,21 @@ private fun ShutterButton(
     ) {
         Box(
             Modifier
-                .size(76.dp)
+                .size(68.dp)
                 .border(4.dp, Color.White, CircleShape),
         )
         if (recording) {
             // 録画中は赤い四角（停止ボタン）
             Box(
                 Modifier
-                    .size(34.dp)
-                    .clip(RoundedCornerShape(8.dp))
+                    .size(30.dp)
+                    .clip(RoundedCornerShape(7.dp))
                     .background(Color.Red),
             )
         } else {
             Box(
                 Modifier
-                    .size(60.dp)
+                    .size(54.dp)
                     .graphicsLayer {
                         scaleX = innerScale
                         scaleY = innerScale
