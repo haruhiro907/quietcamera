@@ -699,6 +699,7 @@ fun SettingsPanel(
     onSoundVolume: (Float) -> Unit,
     onSoundInSilent: (Boolean) -> Unit,
     onHaptics: (Boolean) -> Unit,
+    onOpenAppSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -785,6 +786,22 @@ fun SettingsPanel(
                 options = ON_OFF,
                 selectedIndex = onOffIndex(settings.hapticsEnabled),
                 onSelect = { onHaptics(it == 1) },
+            )
+        }
+        // アプリ設定（旧・歯車ボタン）はパネル内に統合した（Phase 6 追加分）
+        Box(
+            modifier = Modifier
+                .padding(top = 10.dp)
+                .clip(RoundedCornerShape(50))
+                .background(GlassFill)
+                .border(1.dp, GlassBorder, RoundedCornerShape(50))
+                .clickable { onOpenAppSettings() }
+                .padding(horizontal = 16.dp, vertical = 9.dp),
+        ) {
+            Text(
+                text = "アプリ設定（起動カメラ・ミラー保存・初期化）",
+                color = Color.White,
+                fontSize = 12.sp,
             )
         }
     }

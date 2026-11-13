@@ -3,6 +3,7 @@ package com.example.quietcamera.presentation.camera
 import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
+import android.content.ContentValues
 import android.graphics.Bitmap
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -20,6 +21,7 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Size
 import android.view.Surface
+import android.provider.MediaStore
 import androidx.camera.core.Camera
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.core.CameraSelector
@@ -30,6 +32,13 @@ import androidx.camera.core.Preview
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.video.MediaStoreOutputOptions
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
+import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.camera.view.ScreenFlashView
 import androidx.compose.animation.AnimatedVisibility
@@ -122,6 +131,9 @@ private fun selectorFor(aspect: AspectSetting): ResolutionSelector =
         )
         .build()
 
+/** 撮影モード（写真 / 動画）。動画は Phase 6 のユーザー要望で追加した。 */
+enum class ShootMode { PHOTO, VIDEO }
+
 private fun jpegQualityFor(quality: CaptureQuality): Int = when (quality) {
     CaptureQuality.STANDARD -> 90
     CaptureQuality.HIGH -> 97
@@ -158,6 +170,18 @@ fun CameraScreen(
 
     var panelOpen by remember { mutableStateOf(false) }
     var appSettingsOpen by remember { mutableStateOf(false) }
+
+    // 動画モード（音声なし。マイク権限を要求しない）
+    var mode by remember { mutableStateOf(ShootMode.PHOTO) }
+    var recording by remember { mutableStateOf<Recording?>(null) }
+    var recordSeconds by remember { mutableIntStateOf(0) }
+    var torchOn by remember { mutableStateOf(false) }
+    val videoCapture = remember {
+        val recorder = Recorder.Builder()
+            .setQualitySelector(QualitySelector.from(Quality.HIGHEST))
+            .build()
+        VideoCapture.withOutput(recorder)
+    }
 
     var useFrontCamera by remember { mutableStateOf(false) }
     var launchCameraApplied by remember { mutableStateOf(false) }
@@ -354,8 +378,8 @@ fun CameraScreen(
         }
     }
 
-    // カメラのバインド（前後切替・アスペクト比・画質の変更で再バインド）
-    LaunchedEffect(cameraGranted, useFrontCamera, imageCapture) {
+    // カメラのバインド（前後切替・アスペクト比・画質・モードの変更で再バインド）
+    LaunchedEffect(cameraGranted, useFrontCamera, imageCapture, mode) {
         if (!cameraGranted) return@LaunchedEffect
         previewReady = false
         val future = ProcessCameraProvider.getInstance(context)
@@ -366,21 +390,25 @@ fun CameraScreen(
                     .setResolutionSelector(selectorFor(settings.aspect))
                     .build()
                 preview.surfaceProvider = previewView.surfaceProvider
-                // 前面は画面フラッシュ（4.7）。背面は物理フラッシュを使う
-                imageCapture.setScreenFlash(
-                    if (useFrontCamera) screenFlashView.screenFlash else null
-                )
+                val selector = if (useFrontCamera) {
+                    CameraSelector.DEFAULT_FRONT_CAMERA
+                } else {
+                    CameraSelector.DEFAULT_BACK_CAMERA
+                }
                 provider.unbindAll()
-                camera = provider.bindToLifecycle(
-                    lifecycleOwner,
-                    if (useFrontCamera) {
-                        CameraSelector.DEFAULT_FRONT_CAMERA
-                    } else {
-                        CameraSelector.DEFAULT_BACK_CAMERA
-                    },
-                    preview,
-                    imageCapture,
-                )
+                camera = if (mode == ShootMode.PHOTO) {
+                    // 前面は画面フラッシュ（4.7）。背面は物理フラッシュを使う
+                    imageCapture.setScreenFlash(
+                        if (useFrontCamera) screenFlashView.screenFlash else null
+                    )
+                    provider.bindToLifecycle(
+                        lifecycleOwner, selector, preview, imageCapture,
+                    )
+                } else {
+                    provider.bindToLifecycle(
+                        lifecycleOwner, selector, preview, videoCapture,
+                    )
+                }
                 exposureIndex = 0
                 exposureFloat = 0f
                 focusLocked = false
@@ -544,7 +572,9 @@ fun CameraScreen(
      * タイマー撮影とカウントダウンのキャンセルでは鳴らさない。
      */
     fun onShutterPressStart() {
-        if (countdown == null && timerSetting == TimerSetting.OFF) {
+        if (mode == ShootMode.PHOTO && countdown == null &&
+            timerSetting == TimerSetting.OFF
+        ) {
             playShutterFeedback()
             flashVisible = true
             suppressCaptureFeedback = true
@@ -637,7 +667,60 @@ fun CameraScreen(
         burstJob = null
     }
 
+    // 録画時間の表示用カウント
+    LaunchedEffect(recording) {
+        if (recording != null) {
+            recordSeconds = 0
+            while (true) {
+                delay(1000)
+                recordSeconds++
+            }
+        }
+    }
+
+    /** 動画の録画開始 / 停止。保存先は Movies/QuietCamera。 */
+    fun toggleRecording() {
+        val active = recording
+        if (active != null) {
+            active.stop()
+            recording = null
+            if (settings.hapticsEnabled) vibrateTick(context)
+            return
+        }
+        if (!previewReady) return
+        val values = ContentValues().apply {
+            put(
+                MediaStore.Video.Media.DISPLAY_NAME,
+                MediaStoreManager.nextVideoDisplayName(),
+            )
+            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/QuietCamera")
+            put(MediaStore.Video.Media.IS_PENDING, 1)
+        }
+        val options = MediaStoreOutputOptions.Builder(
+            context.contentResolver,
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+        ).setContentValues(values).build()
+        playShutterFeedback()
+        recording = videoCapture.output
+            .prepareRecording(context, options)
+            .start(ContextCompat.getMainExecutor(context)) { event ->
+                if (event is VideoRecordEvent.Finalize) {
+                    recording = null
+                    errorStatus = if (event.hasError()) {
+                        "動画の保存に失敗しました"
+                    } else {
+                        "動画を保存しました"
+                    }
+                }
+            }
+    }
+
     fun onShutter() {
+        if (mode == ShootMode.VIDEO) {
+            toggleRecording()
+            return
+        }
         when {
             countdown != null -> countdown = null // 4.5: カウント中の再タップでキャンセル
             timerSetting != TimerSetting.OFF -> countdown = timerSetting.seconds
@@ -701,7 +784,9 @@ fun CameraScreen(
         // プレビュー（アスペクト比で配置が変わる、3.2）+ ジェスチャ + オーバーレイ
         Box(
             modifier = Modifier
-                .align(Alignment.Center)
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 64.dp)
                 .fillMaxWidth()
                 .aspectRatio(previewRatio)
                 .onSizeChanged { previewSize = it }
@@ -773,6 +858,64 @@ fun CameraScreen(
                     modifier = Modifier.align(Alignment.Center),
                 )
             }
+            // 録画中インジケータ
+            if (recording != null) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 12.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .padding(horizontal = 12.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        Modifier
+                            .size(9.dp)
+                            .clip(CircleShape)
+                            .background(Color.Red),
+                    )
+                    Text(
+                        text = "%d:%02d".format(recordSeconds / 60, recordSeconds % 60),
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
+                }
+            }
+            // ズームピル / ダイヤルはプレビューの内側下部に置く（iPhone と同じ）
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(
+                        bottom = if (settings.aspect == AspectSetting.RATIO_16_9) {
+                            96.dp
+                        } else {
+                            12.dp
+                        },
+                    ),
+            ) {
+                if (dialOpen) {
+                    ZoomDial(
+                        minZoom = minZoom,
+                        maxZoom = maxZoom,
+                        currentZoom = zoomRatio,
+                        onZoomChange = { setZoom(it) },
+                        onClose = { dialOpen = false },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 24.dp),
+                    )
+                } else {
+                    ZoomPill(
+                        stops = zoomStops,
+                        currentZoom = zoomRatio,
+                        onStopSelected = { animateZoomTo(it) },
+                        onDialOpen = { dialOpen = true },
+                    )
+                }
+            }
         }
 
         // 上部バー + 設定パネル（3.2: 左フラッシュ / 中央シェブロン / 右タイマー・歯車）
@@ -788,8 +931,24 @@ fun CameraScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                    TopBarButton(onClick = { flashMenuOpen = !flashMenuOpen }) {
-                        BoltIcon(mode = flashMode, modifier = Modifier.size(20.dp))
+                    TopBarButton(
+                        onClick = {
+                            if (mode == ShootMode.VIDEO) {
+                                torchOn = !torchOn
+                                camera?.cameraControl?.enableTorch(torchOn)
+                            } else {
+                                flashMenuOpen = !flashMenuOpen
+                            }
+                        },
+                    ) {
+                        BoltIcon(
+                            mode = if (mode == ShootMode.VIDEO) {
+                                if (torchOn) FlashMode.ON else FlashMode.OFF
+                            } else {
+                                flashMode
+                            },
+                            modifier = Modifier.size(20.dp),
+                        )
                     }
                 }
                 TopBarButton(
@@ -801,39 +960,12 @@ fun CameraScreen(
                     )
                 }
                 Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (errorStatus != null) {
-                            Text(
-                                text = errorStatus!!,
-                                color = Color.White,
-                                fontSize = 12.sp,
-                                modifier = Modifier.padding(end = 8.dp),
-                            )
-                        }
-                        TopBarButton(
-                            onClick = {
-                                scope.launch {
-                                    settingsStore.setTimer(timerSetting.next())
-                                }
-                            },
-                        ) {
-                            if (timerSetting == TimerSetting.OFF) {
-                                TimerIcon(Modifier.size(20.dp))
-                            } else {
-                                Text(
-                                    text = "${timerSetting.seconds}s",
-                                    color = AccentYellow,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold,
-                                )
-                            }
-                        }
-                        TopBarButton(
-                            onClick = { if (!keyguardLocked) appSettingsOpen = true },
-                            modifier = Modifier.padding(start = 8.dp),
-                        ) {
-                            GearIcon(Modifier.size(20.dp))
-                        }
+                    if (errorStatus != null) {
+                        Text(
+                            text = errorStatus!!,
+                            color = Color.White,
+                            fontSize = 12.sp,
+                        )
                     }
                 }
             }
@@ -881,6 +1013,10 @@ fun CameraScreen(
                     onHaptics = {
                         scope.launch { settingsStore.setHapticsEnabled(it) }
                     },
+                    onOpenAppSettings = {
+                        panelOpen = false
+                        appSettingsOpen = true
+                    },
                     modifier = Modifier.padding(top = 8.dp),
                 )
             }
@@ -896,26 +1032,6 @@ fun CameraScreen(
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            if (dialOpen) {
-                ZoomDial(
-                    minZoom = minZoom,
-                    maxZoom = maxZoom,
-                    currentZoom = zoomRatio,
-                    onZoomChange = { setZoom(it) },
-                    onClose = { dialOpen = false },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 8.dp),
-                )
-            } else {
-                ZoomPill(
-                    stops = zoomStops,
-                    currentZoom = zoomRatio,
-                    onStopSelected = { animateZoomTo(it) },
-                    onDialOpen = { dialOpen = true },
-                    modifier = Modifier.padding(bottom = 8.dp),
-                )
-            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -952,7 +1068,10 @@ fun CameraScreen(
 
                 ShutterButton(
                     enabled = previewReady,
-                    burstEnabled = countdown == null && timerSetting == TimerSetting.OFF,
+                    burstEnabled = mode == ShootMode.PHOTO && countdown == null &&
+                        timerSetting == TimerSetting.OFF,
+                    recording = recording != null,
+                    videoMode = mode == ShootMode.VIDEO,
                     pressed = shutterPressed,
                     capturing = capturing || countdown != null,
                     onPressedChange = { shutterPressed = it },
@@ -971,7 +1090,9 @@ fun CameraScreen(
                             .size(48.dp)
                             .clip(CircleShape)
                             .background(Color.White.copy(alpha = 0.16f))
-                            .clickable { useFrontCamera = !useFrontCamera },
+                            .clickable(enabled = recording == null) {
+                                useFrontCamera = !useFrontCamera
+                            },
                         contentAlignment = Alignment.Center,
                     ) {
                         CameraSwitchIcon(
@@ -983,13 +1104,28 @@ fun CameraScreen(
                 }
             }
 
-            Text(
-                text = "PHOTO",
-                color = Color.White,
-                fontSize = 11.sp,
-                letterSpacing = 2.sp,
+            Row(
                 modifier = Modifier.padding(top = 10.dp),
-            )
+                horizontalArrangement = Arrangement.spacedBy(28.dp),
+            ) {
+                listOf(ShootMode.VIDEO, ShootMode.PHOTO).forEach { m ->
+                    val selected = mode == m
+                    Text(
+                        text = if (m == ShootMode.VIDEO) "VIDEO" else "PHOTO",
+                        color = if (selected) {
+                            AccentYellow
+                        } else {
+                            Color.White.copy(alpha = 0.55f)
+                        },
+                        fontSize = 11.sp,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        letterSpacing = 2.sp,
+                        modifier = Modifier
+                            .clickable(enabled = recording == null) { mode = m }
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                    )
+                }
+            }
         }
 
         // 撮影フィードバックの暗転は画面全体にかける（Phase 6 の指摘）
@@ -1032,6 +1168,8 @@ fun CameraScreen(
 private fun ShutterButton(
     enabled: Boolean,
     burstEnabled: Boolean,
+    recording: Boolean,
+    videoMode: Boolean,
     pressed: Boolean,
     capturing: Boolean,
     onPressedChange: (Boolean) -> Unit,
@@ -1087,16 +1225,32 @@ private fun ShutterButton(
                 .size(76.dp)
                 .border(4.dp, Color.White, CircleShape),
         )
-        Box(
-            Modifier
-                .size(60.dp)
-                .graphicsLayer {
-                    scaleX = innerScale
-                    scaleY = innerScale
-                }
-                .clip(CircleShape)
-                .background(if (enabled) Color.White else Color.Gray),
-        )
+        if (recording) {
+            // 録画中は赤い四角（停止ボタン）
+            Box(
+                Modifier
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color.Red),
+            )
+        } else {
+            Box(
+                Modifier
+                    .size(60.dp)
+                    .graphicsLayer {
+                        scaleX = innerScale
+                        scaleY = innerScale
+                    }
+                    .clip(CircleShape)
+                    .background(
+                        when {
+                            videoMode -> Color.Red
+                            enabled -> Color.White
+                            else -> Color.Gray
+                        }
+                    ),
+            )
+        }
     }
 }
 

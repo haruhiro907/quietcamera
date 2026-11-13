@@ -146,6 +146,23 @@ object MediaStoreManager {
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     }
 
+    private var lastVideoBaseName: String? = null
+    private var videoSuffixCounter = 0
+
+    /** 動画ファイル名 VID_YYYYMMDD_HHMMSS（同一秒は連番）。 */
+    @Synchronized
+    fun nextVideoDisplayName(): String {
+        val base = "VID_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        return if (base == lastVideoBaseName) {
+            videoSuffixCounter++
+            "%s_%03d".format(base, videoSuffixCounter)
+        } else {
+            lastVideoBaseName = base
+            videoSuffixCounter = 0
+            base
+        }
+    }
+
     /**
      * 自アプリが保存した最新の写真の URI を返す（7.3 のサムネイル初期表示用）。
      * 自分のメディアへのクエリなので読み取り権限は不要。呼び出しは IO スレッドで行うこと。
