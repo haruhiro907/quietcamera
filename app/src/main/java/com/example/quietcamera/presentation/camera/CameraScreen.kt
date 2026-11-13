@@ -8,6 +8,8 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CameraMetadata
 import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.SoundPool
@@ -19,6 +21,7 @@ import android.os.VibratorManager
 import android.util.Size
 import android.view.Surface
 import androidx.camera.core.Camera
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
@@ -236,7 +239,7 @@ fun CameraScreen(
 
     // アスペクト比・画質が変わったら ImageCapture を作り直す（8.1）
     val imageCapture = remember(settings.aspect, settings.quality) {
-        ImageCapture.Builder()
+        val builder = ImageCapture.Builder()
             .setCaptureMode(
                 when (settings.quality) {
                     CaptureQuality.STANDARD -> ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
@@ -245,7 +248,19 @@ fun CameraScreen(
             )
             .setJpegQuality(jpegQualityFor(settings.quality))
             .setResolutionSelector(selectorFor(settings.aspect))
-            .build()
+        if (settings.quality == CaptureQuality.HIGH) {
+            // 高画質では Camera2 Interop でノイズ低減・エッジ強調を高品質にする（8.1）
+            Camera2Interop.Extender(builder)
+                .setCaptureRequestOption(
+                    CaptureRequest.NOISE_REDUCTION_MODE,
+                    CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY,
+                )
+                .setCaptureRequestOption(
+                    CaptureRequest.EDGE_MODE,
+                    CameraMetadata.EDGE_MODE_HIGH_QUALITY,
+                )
+        }
+        builder.build()
     }
 
     DisposableEffect(Unit) {
