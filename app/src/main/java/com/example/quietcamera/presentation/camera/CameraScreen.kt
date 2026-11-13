@@ -103,7 +103,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -214,7 +213,6 @@ fun CameraScreen(
     var previewSize by remember { mutableStateOf(IntSize.Zero) }
     var rootSize by remember { mutableStateOf(IntSize.Zero) }
     var pillSize by remember { mutableStateOf(IntSize.Zero) }
-    var finderBottomRootPx by remember { mutableStateOf(0) }
     var errorStatus by remember { mutableStateOf<String?>(null) }
     var flashVisible by remember { mutableStateOf(false) }
 
@@ -840,10 +838,6 @@ fun CameraScreen(
                 .fillMaxWidth()
                 .aspectRatio(previewRatio)
                 .onSizeChanged { previewSize = it }
-                .onGloballyPositioned {
-                    finderBottomRootPx =
-                        (it.localToRoot(Offset.Zero).y + it.size.height).toInt()
-                }
                 .previewGestures(
                     onTapFocus = { focusAt(it, lock = false) },
                     onLongPressLock = { focusAt(it, lock = true) },
@@ -941,14 +935,13 @@ fun CameraScreen(
                 }
             }
             // ズームピル / ダイヤルはプレビューの内側下部（パネル開時は隠す）。
-            // 中心の指定値は 1980（ユーザー指示で 1700 から +280 下げ）。
-            // レイアウト実測のファインダー下端（ルート座標）からインセットを出す
-            val pillInset = if (finderBottomRootPx > 0 && pillSize.height > 0) {
-                val centerPx = 1980f * (effRootH / 2400f)
-                ((finderBottomRootPx - centerPx - pillSize.height / 2f) /
-                    density.density).dp.coerceAtLeast(0.dp)
+            // 中心はファインダー下端から 92px 上（ユーザーの黄色マーカー中心
+            // y=1737、下端 1829 との差から算出）。下端基準の相対配置にする
+            val pillInset = if (pillSize.height > 0) {
+                ((92f - pillSize.height / 2f) / density.density).dp
+                    .coerceAtLeast(0.dp)
             } else {
-                15.dp
+                13.dp
             }
             if (!panelOpen) {
                 Box(
