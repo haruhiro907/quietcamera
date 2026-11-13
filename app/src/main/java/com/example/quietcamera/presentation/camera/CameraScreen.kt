@@ -70,6 +70,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.WindowInsets
@@ -917,6 +918,8 @@ fun CameraScreen(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .padding(top = 12.dp)
+                        // ユーザー指示でデバイス座標 280px 分、上へずらす
+                        .offset(y = -(280f * (effRootH / 2400f) / density.density).dp)
                         .clip(RoundedCornerShape(50))
                         .background(Color.Black.copy(alpha = 0.55f))
                         .padding(horizontal = 12.dp, vertical = 5.dp),
@@ -938,10 +941,10 @@ fun CameraScreen(
                 }
             }
             // ズームピル / ダイヤルはプレビューの内側下部（パネル開時は隠す）。
-            // 中心がデバイス座標 y=1700 に来るよう、レイアウト実測の
-            // ファインダー下端（ルート座標）からインセットを出す
+            // 中心の指定値は 1980（ユーザー指示で 1700 から +280 下げ）。
+            // レイアウト実測のファインダー下端（ルート座標）からインセットを出す
             val pillInset = if (finderBottomRootPx > 0 && pillSize.height > 0) {
-                val centerPx = 1700f * (effRootH / 2400f)
+                val centerPx = 1980f * (effRootH / 2400f)
                 ((finderBottomRootPx - centerPx - pillSize.height / 2f) /
                     density.density).dp.coerceAtLeast(0.dp)
             } else {
